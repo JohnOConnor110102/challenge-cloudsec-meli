@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { isNvdApiKey } from './nvd/validation.js';
 
 const nodeEnvironments = ['development', 'test', 'production'] as const;
 const logLevels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
@@ -8,6 +9,7 @@ export interface Config {
   host: string;
   port: number;
   logLevel: (typeof logLevels)[number];
+  nvdApiKey: string | undefined;
 }
 
 function enumValue<T extends string>(
@@ -34,10 +36,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error('PORT debe ser un entero entre 1 y 65535');
   }
 
+  const nvdApiKey = env.NVD_API_KEY;
+  if (nvdApiKey !== undefined && !isNvdApiKey(nvdApiKey)) {
+    throw new Error('NVD_API_KEY tiene un valor inválido');
+  }
+
   return {
     nodeEnv: enumValue('NODE_ENV', env.NODE_ENV ?? 'development', nodeEnvironments),
     host,
     port,
     logLevel: enumValue('LOG_LEVEL', env.LOG_LEVEL ?? 'info', logLevels),
+    nvdApiKey,
   };
 }

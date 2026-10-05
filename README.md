@@ -44,20 +44,56 @@ Ambos devuelven HTTP `200` con `{"status":"ok"}`.
 | `GET /health/live`  | El proceso responde solicitudes HTTP                    |
 | `GET /health/ready` | Fastify completó su inicialización y acepta solicitudes |
 
-Todavía no hay DB ni conexión al NVD: readiness no verifica dependencias externas en esta etapa. Los endpoints no devuelven configuración ni credenciales. Durante el cierre, Fastify deja de aceptar nuevas solicitudes y espera las que están en curso.
+Todavía no hay DB ni sincronización: el cliente NVD está disponible, pero los health checks no consultan al proveedor. Los endpoints no devuelven configuración ni credenciales. Durante el cierre, Fastify deja de aceptar nuevas solicitudes y espera las que están en curso.
 
 ## Configuración
 
-| Variable    | Valor predeterminado | Validación                                                    |
-| ----------- | -------------------- | ------------------------------------------------------------- |
-| `NODE_ENV`  | `development`        | `development`, `test` o `production`                          |
-| `HOST`      | `127.0.0.1`          | Dirección IPv4 o IPv6 literal                                 |
-| `PORT`      | `3000`               | Entero decimal entre 1 y 65535                                |
-| `LOG_LEVEL` | `info`               | `fatal`, `error`, `warn`, `info`, `debug`, `trace` o `silent` |
+| Variable      | Valor predeterminado | Validación                                                                                     |
+| ------------- | -------------------- | ---------------------------------------------------------------------------------------------- |
+| `NODE_ENV`    | `development`        | `development`, `test` o `production`                                                           |
+| `HOST`        | `127.0.0.1`          | Dirección IPv4 o IPv6 literal                                                                  |
+| `PORT`        | `3000`               | Entero decimal entre 1 y 65535                                                                 |
+| `LOG_LEVEL`   | `info`               | `fatal`, `error`, `warn`, `info`, `debug`, `trace` o `silent`                                  |
+| `NVD_API_KEY` | Sin key              | Opcional; si está definida, debe contener entre 1 y 256 caracteres ASCII visibles sin espacios |
+
+En una etapa posterior de la implementación, la key NVD se almacenará en AWS Secrets Manager cifrada en reposo con KMS y se recuperará al iniciar el proceso mediante el SDK y el task role de ECS. La variable `NVD_API_KEY` no se escribirá en `.env`, en la imagen Docker ni en logs.
 
 Una configuración inválida impide iniciar el servidor y termina con código `1`. El error identifica la variable sin registrar su valor. Los valores vacíos se consideran inválidos.
 
 `.env.example` contiene únicamente valores de ejemplo. `HOST=0.0.0.0` permite escuchar en todas las interfaces cuando se incorpore Docker; para desarrollo local se utiliza loopback.
+
+## Cliente NVD
+
+El cliente en [src/nvd/client.ts](src/nvd/client.ts) consulta la API CVE 2.0 mediante `fetch` de Node, sin dependencias adicionales. En esta entrega se puede usar desde código; todavía no se incorpora a las rutas HTTP ni inicia una sincronización al arrancar el servidor.
+
+| Método                                    | Resultado                                                                                          |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `getCve(id)`                              | Registro con el ID solicitado o `null` si una respuesta válida no contiene resultados              |
+| `getPage({ startIndex, resultsPerPage })` | Una página validada; valores predeterminados: índice `0` y tamaño `2000`                           |
+| `pages({ startIndex, resultsPerPage })`   | Iterador asíncrono que obtiene una página por vez y permite detenerse sin descargar las siguientes |
+
+Cada página devuelve `startIndex`, `resultsPerPage`, `totalResults`, `timestamp` y `cves`. Cada CVE conserva `id`, fechas, estado y el objeto `metrics`; los restantes campos del proveedor no se incorporan al modelo local. Las métricas todavía no se interpretan ni se elige una severidad. Los registros `Rejected` también se conservan para aplicar la política de clasificación en el próximo paso.
+
+### Probar una consulta
+
+Con Node configurado y dependencias instaladas:
+
+```bash
+npm run build
+node --env-file-if-exists=.env --input-type=module <<'JS'
+import { loadConfig } from './dist/config.js';
+import { NvdClient } from './dist/nvd/client.js';
+
+const client = new NvdClient({ apiKey: loadConfig().nvdApiKey });
+const cve = await client.getCve('CVE-2021-44228');
+console.log(cve ? { id: cve.id, status: cve.vulnStatus, metrics: Object.keys(cve.metrics) } : null);
+
+const page = await client.getPage({ resultsPerPage: 2 });
+console.log({ startIndex: page.startIndex, received: page.cves.length, totalResults: page.totalResults });
+JS
+```
+
+El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el catálogo completo. Para probar sin key, dejar `NVD_API_KEY` sin definir.
 
 ## Verificación
 
@@ -82,4 +118,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-Los endpoints del challenge, persistencia, autenticación/autorización, Docker, despliegue e infraestructura cloud se incorporarán en las próximas entregas. Esta entrega agrega CI y seguridad a la base del servidor.
+El próximo paso es la clasificación CVSS. Después se incorporarán sincronización inicial en memoria y endpoints, y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes. Esta entrega se detiene en el cliente NVD para revisar su contrato y comportamiento antes de integrarlo.
