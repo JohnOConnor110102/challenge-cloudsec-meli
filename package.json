@@ -1,0 +1,24 @@
+{
+  "name": "challenge-cloudsec-meli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/server.ts",
+    "build": "tsc",
+    "start": "node --env-file-if-exists=.env dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test --test-isolation=none test/*.test.ts"
+  },
+  "dependencies": {
+    "fastify": "5.12.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}
