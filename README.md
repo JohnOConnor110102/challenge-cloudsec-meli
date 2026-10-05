@@ -118,4 +118,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo paso es la clasificación CVSS. Después se incorporarán sincronización inicial en memoria y endpoints, y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes. Esta entrega se detiene en el cliente NVD para revisar su contrato y comportamiento antes de integrarlo.
+El próximo incremento es la selección de métricas CVSS de NVD. Después se completará la clasificación de cada CVE y se incorporarán sincronización inicial en memoria y endpoints, y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
