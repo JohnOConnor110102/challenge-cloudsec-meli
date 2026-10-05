@@ -68,6 +68,18 @@ npm run build
 npm audit --audit-level=high
 ```
 
+## CI y seguridad
+
+El workflow [CI](.github/workflows/ci.yml) se ejecuta en PRs hacia `main`, pushes a `main`, o manualmente desde Actions.
+
+Los tres jobs se ejecutan en paralelo:
+
+| Check                    | Cobertura                                                                                 | Cuándo falla                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `Calidad y dependencias` | Instalación desde el lockfile, tipos, tests, compilación y `npm audit`                    | Error en cualquiera de esas operaciones o vulnerabilidades `high`/`critical` |
+| `Secretos`               | Gitleaks sobre todos los commits alcanzables por las referencias obtenidas en el checkout | Se detecta un secreto o falla la herramienta                                 |
+| `SAST`                   | Semgrep sobre `src`, `test` y `.github/workflows`                                         | Se detecta un hallazgo o falla el análisis/configuración                     |
+
 ## Alcance pendiente
 
-Los endpoints del challenge, persistencia, autenticación/autorización, Docker, CI/CD e infraestructura cloud se incorporarán en las próximas entregas. Esta rama se detiene en el bootstrap para revisar la base antes de continuar.
+Los endpoints del challenge, persistencia, autenticación/autorización, Docker, despliegue e infraestructura cloud se incorporarán en las próximas entregas. Esta entrega agrega CI y seguridad a la base del servidor.
