@@ -22,10 +22,12 @@ test('health checks responden sin revelar configuración', async (t) => {
   const app = buildApp(loadConfig({ NODE_ENV: 'test' }));
   t.after(() => app.close());
 
-  for (const path of ['/health/live', '/health/ready']) {
+  for (const [path, statusCode, status] of [
+    ['/health/live', 200, 'ok'], ['/health/ready', 503, 'not_ready'],
+  ] as const) {
     const response = await app.inject({ method: 'GET', url: path });
-    assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.json(), { status: 'ok' });
+    assert.equal(response.statusCode, statusCode);
+    assert.deepEqual(response.json(), { status });
     assert.match(response.headers['content-type'] ?? '', /application\/json/);
   }
   const unknownRoute = await app.inject({ method: 'GET', url: '/api/v1/vulnerabilities' });

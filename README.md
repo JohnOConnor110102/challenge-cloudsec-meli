@@ -37,14 +37,14 @@ curl -i http://127.0.0.1:3000/health/live
 curl -i http://127.0.0.1:3000/health/ready
 ```
 
-Ambos devuelven HTTP `200` con `{"status":"ok"}`.
+`live` devuelve HTTP `200` con `{"status":"ok"}`. `ready` devuelve `503` con `{"status":"not_ready"}` durante la carga o si falla, y `200` cuando se completa.
 
 | Ruta                | Significado en esta entrega                             |
 | ------------------- | ------------------------------------------------------- |
 | `GET /health/live`  | El proceso responde solicitudes HTTP                    |
-| `GET /health/ready` | Fastify completó su inicialización y acepta solicitudes |
+| `GET /health/ready` | El catálogo NVD terminó de cargarse                     |
 
-Todavía no hay DB y la sincronización no se inicia con el servidor: los health checks no consultan al proveedor. Los endpoints no devuelven configuración ni credenciales. Durante el cierre, Fastify deja de aceptar nuevas solicitudes y espera las que están en curso.
+La carga NVD comienza en segundo plano al escuchar HTTP. Los health checks consultan el estado local y no hacen solicitudes a NVD. Al cerrar, se cancela la carga y se esperan las solicitudes HTTP en curso.
 
 ## Configuración
 
@@ -64,7 +64,7 @@ Una configuración inválida impide iniciar el servidor y termina con código `1
 
 ## Cliente NVD
 
-El cliente en [src/nvd/client.ts](src/nvd/client.ts) consulta la API CVE 2.0 mediante `fetch` de Node, sin dependencias adicionales. En esta entrega se puede usar desde código; todavía no se incorpora a las rutas HTTP ni inicia una sincronización al arrancar el servidor.
+El cliente en [src/nvd/client.ts](src/nvd/client.ts) consulta la API CVE 2.0 mediante `fetch` de Node, sin dependencias adicionales, y se utiliza en la carga inicial del servidor. Las consultas aceptan un `AbortSignal` opcional para cancelar solicitudes y esperas.
 
 | Método                                    | Resultado                                                                                          |
 | ----------------------------------------- | -------------------------------------------------------------------------------------------------- |
@@ -106,7 +106,9 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 
 [CveCatalog](src/sync/catalog.ts) guarda un registro por ID con sus fechas, estado y clasificación. Cada carga reemplaza el registro anterior y recalcula su severidad; conserva también CVEs sin score y rechazados. Las consultas devuelven copias. El catálogo inicia vacío y se pierde al reiniciar.
 
-[InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` tras la consulta en curso y expone el progreso. Guarda el checkpoint después de cada página y permite reanudar en memoria; llamadas simultáneas comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. Todavía no se inicia con el servidor ni representa una instantánea atómica de NVD.
+[InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` cancelando la consulta o espera y expone el progreso. Guarda checkpoints en memoria; llamadas simultáneas comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. La carga no representa una instantánea atómica de NVD.
+
+Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inicio, progreso cada 5 segundos y resultado, sin keys ni detalles crudos del proveedor. Un fallo mantiene `ready` en `503` después de los reintentos del cliente. `SIGINT`/`SIGTERM` cancelan la carga; reiniciar vuelve a cargar desde cero. La descarga completa puede tardar varios minutos por los límites de NVD.
 
 ## Verificación
 
@@ -131,4 +133,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo incremento es la integración de la sincronización al inicio del servidor. Después se incorporarán los endpoints y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+El próximo paso es el endpoint de resumen total por severidad. Después se incorporarán registro de remediaciones, resumen de pendientes y persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.

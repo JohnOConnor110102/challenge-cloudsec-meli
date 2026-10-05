@@ -18,6 +18,7 @@ export class InitialSync {
   };
   #task: Promise<void> | undefined;
   #stopRequested = false;
+  #controller: AbortController | undefined;
 
   constructor(client: Pick<NvdClient, 'getPage'>, catalog: CveCatalog) {
     if (catalog.size !== 0) throw new Error('La carga inicial requiere un catálogo vacío');
@@ -33,14 +34,21 @@ export class InitialSync {
     if (this.#task !== undefined) return this.#task;
     if (this.#state.status === 'completed') return Promise.resolve();
     this.#stopRequested = false;
+    this.#controller = new AbortController();
     this.#state.status = 'running';
-    this.#task = this.#load().finally(() => { this.#task = undefined; });
+    this.#task = this.#load().finally(() => {
+      this.#task = undefined;
+      this.#controller = undefined;
+    });
     return this.#task;
   }
 
-  // Pausa cooperativa: la consulta en curso termina antes de detenerse.
+  // Conserva el checkpoint y cancela la consulta o espera en curso.
   stop(): void {
-    if (this.#state.status === 'running') this.#stopRequested = true;
+    if (this.#state.status === 'running') {
+      this.#stopRequested = true;
+      this.#controller?.abort();
+    }
   }
 
   async #load(): Promise<void> {
@@ -48,6 +56,7 @@ export class InitialSync {
       while (!this.#stopRequested) {
         const page = await this.#client.getPage({
           startIndex: this.#state.nextStartIndex, resultsPerPage: MAX_PAGE_SIZE,
+          signal: this.#controller!.signal,
         });
         if (this.#stopRequested) break;
         if (page.startIndex !== this.#state.nextStartIndex
@@ -72,6 +81,10 @@ export class InitialSync {
       }
       this.#state.status = 'paused';
     } catch (error) {
+      if (this.#stopRequested) {
+        this.#state.status = 'paused';
+        return;
+      }
       this.#state.status = 'failed';
       throw error;
     }
