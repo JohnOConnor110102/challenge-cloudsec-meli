@@ -5,13 +5,6 @@ async function main() {
   const config = loadConfig();
   const app = buildApp(config);
 
-  try {
-    await app.listen({ host: config.host, port: config.port });
-  } catch (error) {
-    await app.close();
-    throw error;
-  }
-
   let closing = false;
   async function shutdown(signal: string) {
     if (closing) return;
@@ -35,6 +28,13 @@ async function main() {
 
   process.on('SIGINT', () => { void shutdown('SIGINT'); });
   process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+
+  try {
+    await app.listen({ host: config.host, port: config.port });
+  } catch (error) {
+    await app.close();
+    throw error;
+  }
 }
 
 main().catch((error: unknown) => {

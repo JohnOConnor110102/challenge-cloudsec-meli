@@ -8,12 +8,13 @@ const MAX_ATTEMPTS = 3;
 const MAX_RETRY_DELAY_MS = 60_000;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 
-type ErrorCode = 'HTTP' | 'TIMEOUT' | 'NETWORK' | 'INVALID_RESPONSE';
+type ErrorCode = 'HTTP' | 'TIMEOUT' | 'NETWORK' | 'INVALID_RESPONSE' | 'CANCELLED';
 const messages: Record<ErrorCode, string> = {
   HTTP: 'NVD rechazó la solicitud',
   TIMEOUT: 'NVD excedió el tiempo de respuesta',
   NETWORK: 'No se pudo conectar con NVD',
   INVALID_RESPONSE: 'Respuesta NVD inválida',
+  CANCELLED: 'Consulta NVD cancelada',
 };
 
 export class NvdError extends Error {
@@ -34,13 +35,33 @@ interface Options {
 
 interface Runtime {
   fetch: typeof fetch;
-  sleep: (ms: number) => Promise<void>;
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   now: () => number;
 }
 
-interface PageOptions {
+interface RequestOptions {
+  signal?: AbortSignal;
+}
+
+interface PageOptions extends RequestOptions {
   startIndex?: number;
   resultsPerPage?: number;
+}
+
+function abortable<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return task;
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => { reject(new NvdError('CANCELLED')); };
+    signal.addEventListener('abort', abort, { once: true });
+    task.then((value) => {
+      signal.removeEventListener('abort', abort);
+      resolve(value);
+    }, (error: unknown) => {
+      signal.removeEventListener('abort', abort);
+      reject(error);
+    });
+    if (signal.aborted) abort();
+  });
 }
 
 function retryAfter(value: string | null): number | undefined {
@@ -99,14 +120,17 @@ export class NvdClient {
     }
     this.#apiKey = options.apiKey;
     this.#timeoutMs = timeoutMs;
-    this.#runtime = { fetch, sleep, now: () => performance.now(), ...runtime };
+    this.#runtime = {
+      fetch, sleep: (ms, signal) => sleep(ms, undefined, { signal }),
+      now: () => performance.now(), ...runtime,
+    };
   }
 
-  async getCve(id: string): Promise<NvdCve | null> {
+  async getCve(id: string, options: RequestOptions = {}): Promise<NvdCve | null> {
     if (!isCveId(id)) throw new Error('El identificador CVE tiene un formato inválido');
     const url = new URL(BASE_URL);
     url.searchParams.set('cveId', id);
-    const page = await this.#request(url);
+    const page = await this.#request(url, options.signal);
     if (page.startIndex !== 0 || page.totalResults > 1 || page.cves.length > 1
       || (page.cves[0] !== undefined && page.cves[0].id !== id)) {
       throw new NvdError('INVALID_RESPONSE');
@@ -124,7 +148,7 @@ export class NvdClient {
     const url = new URL(BASE_URL);
     url.searchParams.set('startIndex', String(startIndex));
     url.searchParams.set('resultsPerPage', String(resultsPerPage));
-    const page = await this.#request(url);
+    const page = await this.#request(url, options.signal);
     if (page.startIndex !== startIndex || page.resultsPerPage > resultsPerPage) {
       throw new NvdError('INVALID_RESPONSE');
     }
@@ -141,12 +165,13 @@ export class NvdClient {
     }
   }
 
-  #request(url: URL): Promise<NvdPage> {
+  #request(url: URL, signal?: AbortSignal): Promise<NvdPage> {
     const result = this.#queue.then(async () => {
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         try {
-          return await this.#attempt(url);
+          return await this.#attempt(url, signal);
         } catch (error) {
+          if (signal?.aborted) throw new NvdError('CANCELLED');
           if (!(error instanceof NvdError)) throw error;
           const transient = error.code === 'NETWORK' || error.code === 'TIMEOUT'
             || (error.code === 'HTTP' && (error.status === 429 || (error.status !== undefined && error.status >= 500)));
@@ -159,15 +184,17 @@ export class NvdClient {
       throw new NvdError('NETWORK');
     });
     this.#queue = result.then(() => undefined, () => undefined);
-    return result;
+    return abortable(result, signal);
   }
 
-  async #attempt(url: URL): Promise<NvdPage> {
+  async #attempt(url: URL, signal?: AbortSignal): Promise<NvdPage> {
+    if (signal?.aborted) throw new NvdError('CANCELLED');
     const wait = this.#nextRequestAt - this.#runtime.now();
     if (wait > MAX_RETRY_DELAY_MS) {
       throw new NvdError('HTTP', this.#cooldownStatus, wait);
     }
-    if (wait > 0) await this.#runtime.sleep(wait);
+    if (wait > 0) await this.#runtime.sleep(wait, signal);
+    if (signal?.aborted) throw new NvdError('CANCELLED');
     this.#nextRequestAt = this.#runtime.now() + REQUEST_INTERVAL_MS;
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(), this.#timeoutMs);
@@ -176,7 +203,7 @@ export class NvdClient {
       if (this.#apiKey !== undefined) headers.set('apiKey', this.#apiKey);
       const response = await this.#runtime.fetch(url, {
         headers,
-        signal: controller.signal,
+        signal: signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal]),
         redirect: 'error',
       });
       if (!response.ok) {
@@ -195,6 +222,7 @@ export class NvdClient {
         throw new NvdError('INVALID_RESPONSE');
       }
     } catch (error) {
+      if (signal?.aborted) throw new NvdError('CANCELLED');
       if (controller.signal.aborted) throw new NvdError('TIMEOUT');
       if (error instanceof NvdError) throw error;
       throw new NvdError('NETWORK');
