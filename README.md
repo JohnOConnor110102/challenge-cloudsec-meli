@@ -72,7 +72,13 @@ El cliente en [src/nvd/client.ts](src/nvd/client.ts) consulta la API CVE 2.0 med
 | `getPage({ startIndex, resultsPerPage })` | Una página validada; valores predeterminados: índice `0` y tamaño `2000`                           |
 | `pages({ startIndex, resultsPerPage })`   | Iterador asíncrono que obtiene una página por vez y permite detenerse sin descargar las siguientes |
 
-Cada página devuelve `startIndex`, `resultsPerPage`, `totalResults`, `timestamp` y `cves`. Cada CVE conserva `id`, fechas, estado y el objeto `metrics`; los restantes campos del proveedor no se incorporan al modelo local. Las métricas todavía no se interpretan ni se elige una severidad. Los registros `Rejected` también se conservan para aplicar la política de clasificación en el próximo paso.
+Cada página devuelve `startIndex`, `resultsPerPage`, `totalResults`, `timestamp` y `cves`. Cada CVE conserva `id`, fechas, estado y el objeto `metrics`; los restantes campos del proveedor no se incorporan al modelo local. El cliente conserva las métricas sin interpretarlas; su selección y la clasificación se realizan por separado. Los registros `Rejected` también se conservan y se identifican como excluidos de los futuros resúmenes.
+
+## Clasificación CVSS
+
+La [selección de métricas](src/cvss/selection.ts) prioriza versiones `4.0 → 3.1 → 3.0 → 2.0`, luego NVD y `Primary`; desempata por mayor score, fuente y vector.
+
+[classifyCve](src/cvss/classification.ts) devuelve la severidad y su evaluación (`scored`), `unknown` sin métricas válidas (`unscored`) o `rejected` para excluirlo de los futuros resúmenes. Conserva la escala de cada versión: cero es `none` en v3/v4 y `low` en v2; 9.8 es `critical` en v3/v4 y `high` en v2.
 
 ### Probar una consulta
 
@@ -83,10 +89,11 @@ npm run build
 node --env-file-if-exists=.env --input-type=module <<'JS'
 import { loadConfig } from './dist/config.js';
 import { NvdClient } from './dist/nvd/client.js';
+import { classifyCve } from './dist/cvss/classification.js';
 
 const client = new NvdClient({ apiKey: loadConfig().nvdApiKey });
 const cve = await client.getCve('CVE-2021-44228');
-console.log(cve ? { id: cve.id, status: cve.vulnStatus, metrics: Object.keys(cve.metrics) } : null);
+console.log(cve ? { id: cve.id, status: cve.vulnStatus, classification: classifyCve(cve) } : null);
 
 const page = await client.getPage({ resultsPerPage: 2 });
 console.log({ startIndex: page.startIndex, received: page.cves.length, totalResults: page.totalResults });
@@ -118,4 +125,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo paso es la clasificación CVSS. Después se incorporarán sincronización inicial en memoria y endpoints, y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes. Esta entrega se detiene en el cliente NVD para revisar su contrato y comportamiento antes de integrarlo.
+El próximo paso es la sincronización inicial en memoria durante la ejecución. Después se incorporarán los endpoints y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
