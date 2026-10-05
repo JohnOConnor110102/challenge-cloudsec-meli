@@ -5,6 +5,7 @@ import { NvdClient } from './nvd/client.js';
 import { CveCatalog } from './sync/catalog.js';
 import { InitialSync } from './sync/initial-sync.js';
 import { registerSyncRuntime } from './sync/runtime.js';
+import { registerVulnerabilityRoutes } from './vulnerabilities/routes.js';
 
 const healthSchema = {
   response: {
@@ -43,6 +44,7 @@ export function buildApp(
   app.decorate('catalog', catalog);
   app.decorate('initialSync', sync);
   registerSyncRuntime(app, sync);
+  registerVulnerabilityRoutes(app, catalog, sync);
 
   app.get('/health/live', { schema: healthSchema }, async () => ({ status: 'ok' }));
   app.get('/health/ready', {
