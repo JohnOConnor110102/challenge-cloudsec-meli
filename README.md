@@ -102,6 +102,10 @@ JS
 
 El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el catálogo completo. Para probar sin key, dejar `NVD_API_KEY` sin definir.
 
+## Catálogo en memoria
+
+[CveCatalog](src/sync/catalog.ts) guarda un registro por ID con sus fechas, estado y clasificación. Cada carga reemplaza el registro anterior y recalcula su severidad; conserva también CVEs sin score y rechazados. Las consultas devuelven copias. El catálogo inicia vacío y se pierde al reiniciar; la carga desde NVD y los checkpoints se incorporarán en el siguiente incremento.
+
 ## Verificación
 
 ```bash
@@ -125,4 +129,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo paso es la sincronización inicial en memoria durante la ejecución. Después se incorporarán los endpoints y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento es la carga paginada de NVD con progreso y reanudación en memoria, seguido de la integración al inicio del servidor. Después se incorporarán los endpoints y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
