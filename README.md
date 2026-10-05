@@ -44,7 +44,7 @@ Ambos devuelven HTTP `200` con `{"status":"ok"}`.
 | `GET /health/live`  | El proceso responde solicitudes HTTP                    |
 | `GET /health/ready` | Fastify completó su inicialización y acepta solicitudes |
 
-Todavía no hay DB ni sincronización: el cliente NVD está disponible, pero los health checks no consultan al proveedor. Los endpoints no devuelven configuración ni credenciales. Durante el cierre, Fastify deja de aceptar nuevas solicitudes y espera las que están en curso.
+Todavía no hay DB y la sincronización no se inicia con el servidor: los health checks no consultan al proveedor. Los endpoints no devuelven configuración ni credenciales. Durante el cierre, Fastify deja de aceptar nuevas solicitudes y espera las que están en curso.
 
 ## Configuración
 
@@ -104,7 +104,9 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 
 ## Catálogo en memoria
 
-[CveCatalog](src/sync/catalog.ts) guarda un registro por ID con sus fechas, estado y clasificación. Cada carga reemplaza el registro anterior y recalcula su severidad; conserva también CVEs sin score y rechazados. Las consultas devuelven copias. El catálogo inicia vacío y se pierde al reiniciar; la carga desde NVD y los checkpoints se incorporarán en el siguiente incremento.
+[CveCatalog](src/sync/catalog.ts) guarda un registro por ID con sus fechas, estado y clasificación. Cada carga reemplaza el registro anterior y recalcula su severidad; conserva también CVEs sin score y rechazados. Las consultas devuelven copias. El catálogo inicia vacío y se pierde al reiniciar.
+
+[InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` tras la consulta en curso y expone el progreso. Guarda el checkpoint después de cada página y permite reanudar en memoria; llamadas simultáneas comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. Todavía no se inicia con el servidor ni representa una instantánea atómica de NVD.
 
 ## Verificación
 
@@ -129,4 +131,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo incremento es la carga paginada de NVD con progreso y reanudación en memoria, seguido de la integración al inicio del servidor. Después se incorporarán los endpoints y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento es la integración de la sincronización al inicio del servidor. Después se incorporarán los endpoints y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
