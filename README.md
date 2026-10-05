@@ -72,7 +72,16 @@ El cliente en [src/nvd/client.ts](src/nvd/client.ts) consulta la API CVE 2.0 med
 | `getPage({ startIndex, resultsPerPage })` | Una página validada; valores predeterminados: índice `0` y tamaño `2000`                           |
 | `pages({ startIndex, resultsPerPage })`   | Iterador asíncrono que obtiene una página por vez y permite detenerse sin descargar las siguientes |
 
-Cada página devuelve `startIndex`, `resultsPerPage`, `totalResults`, `timestamp` y `cves`. Cada CVE conserva `id`, fechas, estado y el objeto `metrics`; los restantes campos del proveedor no se incorporan al modelo local. Las métricas todavía no se interpretan ni se elige una severidad. Los registros `Rejected` también se conservan para aplicar la política de clasificación en el próximo paso.
+Cada página devuelve `startIndex`, `resultsPerPage`, `totalResults`, `timestamp` y `cves`. Cada CVE conserva `id`, fechas, estado y el objeto `metrics`; los restantes campos del proveedor no se incorporan al modelo local. El cliente conserva las métricas sin interpretarlas; su selección se realiza por separado. Los registros `Rejected` también se conservan para aplicar la política de clasificación en el próximo incremento.
+
+## Selección de métricas CVSS
+
+La política del proyecto aplica estas prioridades en orden:
+
+1. Versión más reciente con alguna métrica válida: `4.0 → 3.1 → 3.0 → 2.0`.
+2. Dentro de esa versión, fuente exacta `nvd@nist.gov` antes que otras fuentes.
+3. Después, `Primary` antes que `Secondary`.
+4. Si siguen empatadas, mayor score; después fuente y vector en orden lexicográfico ordinal para que reordenar la respuesta no cambie el resultado.
 
 ### Probar una consulta
 
@@ -118,4 +127,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo incremento es la selección de métricas CVSS de NVD. Después se completará la clasificación de cada CVE y se incorporarán sincronización inicial en memoria y endpoints, y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento es la clasificación de cada CVE, incluyendo los casos sin score y `Rejected`. Después se incorporarán sincronización inicial en memoria y endpoints, y luego persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
