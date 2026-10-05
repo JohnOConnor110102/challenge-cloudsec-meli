@@ -106,6 +106,8 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 
 [CveCatalog](src/sync/catalog.ts) guarda un registro por ID con sus fechas, estado y clasificación. Cada carga reemplaza el registro anterior y recalcula su severidad; conserva también CVEs sin score y rechazados. Las consultas devuelven copias. El catálogo inicia vacío y se pierde al reiniciar.
 
+`catalog.summary()` calcula los conteos sobre los registros actuales, incluyendo categorías en cero. `total` suma `none`, `low`, `medium`, `high`, `critical` y `unknown`; `excludedRejected` informa los rechazados aparte. El cálculo es local, recorre el catálogo sin copiarlo completo y devuelve un resultado independiente. La ruta HTTP se incorporará en el próximo incremento.
+
 [InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` cancelando la consulta o espera y expone el progreso. Guarda checkpoints en memoria; llamadas simultáneas comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. La carga no representa una instantánea atómica de NVD.
 
 Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inicio, progreso cada 5 segundos y resultado, sin keys ni detalles crudos del proveedor. Un fallo mantiene `ready` en `503` después de los reintentos del cliente. `SIGINT`/`SIGTERM` cancelan la carga; reiniciar vuelve a cargar desde cero. La descarga completa puede tardar varios minutos por los límites de NVD.
@@ -133,4 +135,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo paso es el endpoint de resumen total por severidad. Después se incorporarán registro de remediaciones, resumen de pendientes y persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento es la ruta HTTP del resumen total por severidad y su respuesta durante la carga inicial. Después se incorporarán registro de remediaciones, resumen de pendientes y persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
