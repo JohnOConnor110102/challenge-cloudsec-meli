@@ -68,8 +68,8 @@ volumes:
   postgres-data:
 
 networks:
-  database:
-    internal: true
+  # Bridge permite acceder desde Node en el host por el puerto loopback publicado.
+  database: {}
 
 secrets:
   db_admin_password:

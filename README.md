@@ -148,10 +148,16 @@ Requiere Docker Engine y Compose v2. PostgreSQL 18.6 está fijado por digest, es
 npm run db:up
 npm run db:migrate
 npm run db:test
+npm run db:check
+npm run db:test:node
 npm run db:stop
 ```
 
 Migraciones SQL ordenadas, transaccionales, con lock y checksum para impedir modificaciones de las aplicadas. El esquema incluye CVEs, checkpoint, remediaciones y auditoría, sin precargar registros. Remediaciones sin FK al catálogo permiten registrar un CVE antes de recibir su página NVD. `db:test` comprueba permisos y restricciones, revirtiendo sus datos; el job de calidad también ejecuta las migraciones y esta prueba. Este incremento prepara la base; los endpoints todavía usan memoria.
+
+Node usa [pg](https://node-postgres.com/apis/pool) sin ORM, como `cve_app`: pool máximo de cinco, conexión 5 s y consulta 10 s (servidor)/12 s (cliente). `DB_PASSWORD_FILE` apunta al secreto privado; `DB_HOST`, `DB_PORT` y `DB_NAME` configuran el destino. `DB_TLS=verify-full` valida certificado e identidad, con `DB_CA_FILE` opcional; sin TLS solo se permite loopback de desarrollo/test. Compose usa bridge con puerto loopback; si cambiás `DB_LOCAL_PORT`, igualá `DB_PORT`. `db:check` verifica conexión/esquema y `db:test:node` prueba el driver en local y CI.
+
+Si ya creaste la red anterior, ejecutá `docker compose down` y luego `npm run db:up` para recrearla conservando el volumen.
 
 ## Verificación
 
@@ -170,10 +176,10 @@ Los tres jobs se ejecutan en paralelo:
 
 | Check                    | Cobertura                                                                                 | Cuándo falla                                                                 |
 | ------------------------ | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `Calidad y dependencias` | Instalación desde el lockfile, tipos, tests, compilación y `npm audit`                    | Error en cualquiera de esas operaciones o vulnerabilidades `high`/`critical` |
+| `Calidad y dependencias` | Lockfile, tipos, tests, compilación, PostgreSQL (migraciones, permisos y driver) y `npm audit` | Error en cualquiera de esas operaciones o vulnerabilidades `high`/`critical` |
 | `Secretos`               | Gitleaks sobre todos los commits alcanzables por las referencias obtenidas en el checkout | Se detecta un secreto o falla la herramienta                                 |
 | `SAST`                   | Semgrep sobre `src`, `test` y `.github/workflows`                                         | Se detecta un hallazgo o falla el análisis/configuración                     |
 
 ## Alcance pendiente
 
-El próximo incremento conecta la aplicación con PostgreSQL. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento guarda el catálogo y sus checkpoints en PostgreSQL. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.

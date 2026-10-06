@@ -1,5 +1,7 @@
 import { isIP } from 'node:net';
 import { isNvdApiKey } from './nvd/validation.js';
+import { loadDatabaseConfig } from './db/config.js';
+import type { DatabaseConfig } from './db/config.js';
 
 const nodeEnvironments = ['development', 'test', 'production'] as const;
 const logLevels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
@@ -10,6 +12,7 @@ export interface Config {
   port: number;
   logLevel: (typeof logLevels)[number];
   nvdApiKey: string | undefined;
+  database: DatabaseConfig;
 }
 
 function enumValue<T extends string>(
@@ -25,6 +28,7 @@ function enumValue<T extends string>(
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const nodeEnv = enumValue('NODE_ENV', env.NODE_ENV ?? 'development', nodeEnvironments);
   const host = env.HOST ?? '127.0.0.1';
   if (isIP(host) === 0) {
     throw new Error('HOST debe ser una dirección IPv4 o IPv6');
@@ -42,10 +46,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   return {
-    nodeEnv: enumValue('NODE_ENV', env.NODE_ENV ?? 'development', nodeEnvironments),
+    nodeEnv,
     host,
     port,
     logLevel: enumValue('LOG_LEVEL', env.LOG_LEVEL ?? 'info', logLevels),
     nvdApiKey,
+    database: loadDatabaseConfig(env, nodeEnv),
   };
 }
