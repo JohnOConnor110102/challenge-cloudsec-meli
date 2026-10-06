@@ -3,6 +3,8 @@ import type { CveClassification } from '../cvss/classification.js';
 import type { NvdCve } from '../nvd/validation.js';
 import { summarizeVulnerabilities } from '../vulnerabilities/summary.js';
 import type { VulnerabilitySummary } from '../vulnerabilities/summary.js';
+import { summarizePendingVulnerabilities } from '../vulnerabilities/pending-summary.js';
+import type { PendingVulnerabilitySummary } from '../vulnerabilities/pending-summary.js';
 
 export interface CatalogEntry {
   id: string;
@@ -36,6 +38,10 @@ export class CveCatalog {
   summary(): VulnerabilitySummary {
     // El cálculo solo lee los registros; evita clonar todo el catálogo.
     return summarizeVulnerabilities(this.#records.values());
+  }
+
+  pendingSummary(isRemediated: (cveId: string) => boolean): PendingVulnerabilitySummary {
+    return summarizePendingVulnerabilities(this.#records.values(), isRemediated);
   }
 
   *values(): IterableIterator<CatalogEntry> {

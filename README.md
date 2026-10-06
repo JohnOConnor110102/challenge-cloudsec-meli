@@ -39,10 +39,10 @@ curl -i http://127.0.0.1:3000/health/ready
 
 `live` devuelve HTTP `200` con `{"status":"ok"}`. `ready` devuelve `503` con `{"status":"not_ready"}` durante la carga o si falla, y `200` cuando se completa.
 
-| Ruta                | Significado en esta entrega                             |
-| ------------------- | ------------------------------------------------------- |
-| `GET /health/live`  | El proceso responde solicitudes HTTP                    |
-| `GET /health/ready` | El catálogo NVD terminó de cargarse                     |
+| Ruta                | Significado en esta entrega          |
+| ------------------- | ------------------------------------ |
+| `GET /health/live`  | El proceso responde solicitudes HTTP |
+| `GET /health/ready` | El catálogo NVD terminó de cargarse  |
 
 La carga NVD comienza en segundo plano al escuchar HTTP. Los health checks consultan el estado local y no hacen solicitudes a NVD. Al cerrar, se cancela la carga y se esperan las solicitudes HTTP en curso.
 
@@ -111,6 +111,8 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 [RemediationService](src/remediations/service.ts) valida el ID y consulta NVD antes de cada alta nueva; permite CVEs sin score y rechaza inexistentes o `Rejected` ([criterio CVE](https://www.cve.org/ResourcesSupport/Glossary?activeTerm=glossaryRecord)). Los duplicados devuelven el registro original sin otra consulta. Un fallo del proveedor o cancelación no guarda datos; no se confunde con un CVE inexistente. Comparte los límites y reintentos del cliente NVD y no modifica el catálogo de la sincronización.
 
 `catalog.summary()` calcula los conteos sobre los registros actuales, incluyendo categorías en cero. `total` suma `none`, `low`, `medium`, `high`, `critical` y `unknown`; `excludedRejected` informa los rechazados aparte. El cálculo es local, recorre el catálogo sin copiarlo completo y devuelve un resultado independiente.
+
+`catalog.pendingSummary(id => remediations.has(id))` excluye las remediaciones del catálogo vigente y devuelve `excludedRemediated`; los `Rejected` siguen separados. Remediaciones fuera del catálogo no restan. Se cumple `total = pendientes + remediadas elegibles`, también por severidad, usando la clasificación actual. Recorre los datos una vez sin copiarlos completos.
 
 [InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` cancelando la consulta o espera y expone el progreso. Guarda checkpoints en memoria; llamadas simultáneas comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. La carga no representa una instantánea atómica de NVD.
 
