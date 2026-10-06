@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { RemediationStore } from '../remediations/store.js';
 import type { CveCatalog } from '../sync/catalog.js';
 import type { InitialSync } from '../sync/initial-sync.js';
 
@@ -40,20 +41,40 @@ const summarySchema = {
   },
 };
 
+const pendingSummarySchema = {
+  response: {
+    ...summarySchema.response,
+    200: {
+      ...summarySchema.response[200],
+      required: [...summarySchema.response[200].required, 'excludedRemediated'],
+      properties: { ...summarySchema.response[200].properties, excludedRemediated: countSchema },
+    },
+  },
+};
+
 export function registerVulnerabilityRoutes(
   app: FastifyInstance,
   catalog: CveCatalog,
   sync: InitialSync,
+  remediations: Pick<RemediationStore, 'has'>,
 ): void {
-  app.get('/api/v1/vulnerabilities/summary', { schema: summarySchema }, async (_request, reply) => {
-    reply.header('Cache-Control', 'no-store');
-    const progress = sync.progress;
-    if (progress.status !== 'completed') {
-      return reply.code(503).send({ error: 'catalog_not_ready', syncStatus: progress.status });
-    }
-    return {
-      ...catalog.summary(),
-      meta: { syncStatus: progress.status, lastPageTimestamp: progress.lastPageTimestamp },
-    };
-  });
+  for (const route of [
+    { path: '/api/v1/vulnerabilities/summary', schema: summarySchema, summarize: () => catalog.summary() },
+    {
+      path: '/api/v1/vulnerabilities/pending/summary', schema: pendingSummarySchema,
+      summarize: () => catalog.pendingSummary((id) => remediations.has(id)),
+    },
+  ]) {
+    app.get(route.path, { schema: route.schema }, async (_request, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      const progress = sync.progress;
+      if (progress.status !== 'completed') {
+        return reply.code(503).send({ error: 'catalog_not_ready', syncStatus: progress.status });
+      }
+      return {
+        ...route.summarize(),
+        meta: { syncStatus: progress.status, lastPageTimestamp: progress.lastPageTimestamp },
+      };
+    });
+  }
 }

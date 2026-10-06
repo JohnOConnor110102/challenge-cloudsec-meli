@@ -39,10 +39,10 @@ curl -i http://127.0.0.1:3000/health/ready
 
 `live` devuelve HTTP `200` con `{"status":"ok"}`. `ready` devuelve `503` con `{"status":"not_ready"}` durante la carga o si falla, y `200` cuando se completa.
 
-| Ruta                | Significado en esta entrega                             |
-| ------------------- | ------------------------------------------------------- |
-| `GET /health/live`  | El proceso responde solicitudes HTTP                    |
-| `GET /health/ready` | El catálogo NVD terminó de cargarse                     |
+| Ruta                | Significado en esta entrega          |
+| ------------------- | ------------------------------------ |
+| `GET /health/live`  | El proceso responde solicitudes HTTP |
+| `GET /health/ready` | El catálogo NVD terminó de cargarse  |
 
 La carga NVD comienza en segundo plano al escuchar HTTP. Los health checks consultan el estado local y no hacen solicitudes a NVD. Al cerrar, se cancela la carga y se esperan las solicitudes HTTP en curso.
 
@@ -112,6 +112,8 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 
 `catalog.summary()` calcula los conteos sobre los registros actuales, incluyendo categorías en cero. `total` suma `none`, `low`, `medium`, `high`, `critical` y `unknown`; `excludedRejected` informa los rechazados aparte. El cálculo es local, recorre el catálogo sin copiarlo completo y devuelve un resultado independiente.
 
+`catalog.pendingSummary(id => remediations.has(id))` excluye las remediaciones del catálogo vigente y devuelve `excludedRemediated`; los `Rejected` siguen separados. Remediaciones fuera del catálogo no restan. Se cumple `total = pendientes + remediadas elegibles`, también por severidad, usando la clasificación actual. Recorre los datos una vez sin copiarlos completos.
+
 [InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` cancelando la consulta o espera y expone el progreso. Guarda checkpoints en memoria; llamadas simultáneas comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. La carga no representa una instantánea atómica de NVD.
 
 Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inicio, progreso cada 5 segundos y resultado, sin keys ni detalles crudos del proveedor. Un fallo mantiene `ready` en `503` después de los reintentos del cliente. `SIGINT`/`SIGTERM` cancelan la carga; reiniciar vuelve a cargar desde cero. La descarga completa puede tardar varios minutos por los límites de NVD.
@@ -122,6 +124,12 @@ Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inic
 
 ```bash
 curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/summary
+```
+
+`GET /api/v1/vulnerabilities/pending/summary` devuelve el mismo formato, más `excludedRemediated`, con conteos que excluyen las remediaciones elegibles. Se recalcula sobre datos locales en cada consulta; comparte el `503` durante la carga, los metadatos y `Cache-Control: no-store` del resumen total.
+
+```bash
+curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/pending/summary
 ```
 
 ## Registrar una remediación
@@ -155,4 +163,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-Los próximos pasos son resumen de pendientes y persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+El próximo paso es persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.

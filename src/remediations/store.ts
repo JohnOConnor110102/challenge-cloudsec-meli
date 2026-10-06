@@ -22,6 +22,10 @@ export class RemediationStore {
     return this.#records.size;
   }
 
+  has(cveId: string): boolean {
+    return this.#records.has(cveId);
+  }
+
   get(cveId: string): Remediation | undefined {
     const record = this.#records.get(cveId);
     return record === undefined ? undefined : { ...record };
