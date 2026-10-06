@@ -106,7 +106,9 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 
 [CveCatalog](src/sync/catalog.ts) guarda un registro por ID con sus fechas, estado y clasificación. Cada carga reemplaza el registro anterior y recalcula su severidad; conserva también CVEs sin score y rechazados. Las consultas devuelven copias. El catálogo inicia vacío y se pierde al reiniciar.
 
-[RemediationStore](src/remediations/store.ts) guarda en memoria un registro por CVE y su fecha de registro en UTC, generada por el servidor. Repetirlo devuelve el registro original sin cambiar la fecha; las consultas devuelven copias. Valida el formato del ID, pero la comprobación de existencia y el endpoint se incorporarán en los próximos incrementos. Los registros se pierden al reiniciar.
+[RemediationStore](src/remediations/store.ts) guarda en memoria un registro por CVE y su fecha de registro en UTC, generada por el servidor. Repetirlo devuelve el registro original sin cambiar la fecha; las consultas devuelven copias. Los registros se pierden al reiniciar.
+
+[RemediationService](src/remediations/service.ts) valida el ID y consulta NVD antes de cada alta nueva; permite CVEs sin score y rechaza inexistentes o `Rejected` ([criterio CVE](https://www.cve.org/ResourcesSupport/Glossary?activeTerm=glossaryRecord)). Los duplicados devuelven el registro original sin otra consulta. Un fallo del proveedor o cancelación no guarda datos; no se confunde con un CVE inexistente. Comparte los límites y reintentos del cliente NVD y no modifica el catálogo de la sincronización. El endpoint HTTP queda para el próximo incremento.
 
 `catalog.summary()` calcula los conteos sobre los registros actuales, incluyendo categorías en cero. `total` suma `none`, `low`, `medium`, `high`, `critical` y `unknown`; `excludedRejected` informa los rechazados aparte. El cálculo es local, recorre el catálogo sin copiarlo completo y devuelve un resultado independiente.
 
