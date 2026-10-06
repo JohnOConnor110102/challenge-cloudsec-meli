@@ -106,6 +106,10 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 
 [CveCatalog](src/sync/catalog.ts) guarda un registro por ID con sus fechas, estado y clasificación. Cada carga reemplaza el registro anterior y recalcula su severidad; conserva también CVEs sin score y rechazados. Las consultas devuelven copias. El catálogo inicia vacío y se pierde al reiniciar.
 
+[RemediationStore](src/remediations/store.ts) guarda en memoria un registro por CVE y su fecha de registro en UTC, generada por el servidor. Repetirlo devuelve el registro original sin cambiar la fecha; las consultas devuelven copias. Los registros se pierden al reiniciar.
+
+[RemediationService](src/remediations/service.ts) valida el ID y consulta NVD antes de cada alta nueva; permite CVEs sin score y rechaza inexistentes o `Rejected` ([criterio CVE](https://www.cve.org/ResourcesSupport/Glossary?activeTerm=glossaryRecord)). Los duplicados devuelven el registro original sin otra consulta. Un fallo del proveedor o cancelación no guarda datos; no se confunde con un CVE inexistente. Comparte los límites y reintentos del cliente NVD y no modifica el catálogo de la sincronización.
+
 `catalog.summary()` calcula los conteos sobre los registros actuales, incluyendo categorías en cero. `total` suma `none`, `low`, `medium`, `high`, `critical` y `unknown`; `excludedRejected` informa los rechazados aparte. El cálculo es local, recorre el catálogo sin copiarlo completo y devuelve un resultado independiente.
 
 [InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` cancelando la consulta o espera y expone el progreso. Guarda checkpoints en memoria; llamadas simultáneas comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. La carga no representa una instantánea atómica de NVD.
@@ -118,6 +122,14 @@ Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inic
 
 ```bash
 curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/summary
+```
+
+## Registrar una remediación
+
+`PUT /api/v1/remediations/:cveId`, sin cuerpo, devuelve `201` con `Location` al crear y `200` al repetir; ambos devuelven `cveId` y `registeredAt` ([semántica PUT](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.4)). Funciona durante la carga inicial. El router limita el ID a 100 caracteres (`414` si se supera); cuerpos se rechazan (límite de lectura: 1 KiB). Devuelve `400` para entradas inválidas, `404` para CVEs inexistentes, `409` para rechazados y `502`/`503`/`504` ante fallos del proveedor; nunca expone errores crudos y utiliza `Cache-Control: no-store`. El plazo total es de 30 segundos, incluyendo cola y reintentos; desconexión o cierre del servidor cancelan la validación. Cada creación emite un log `remediation_registered` con CVE, fecha y `requestId`; los duplicados no repiten ese evento. El registro y la auditoría persistentes siguen pendientes.
+
+```bash
+curl -i -X PUT http://127.0.0.1:3000/api/v1/remediations/CVE-2021-44228
 ```
 
 ## Verificación
@@ -143,4 +155,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-Los próximos pasos son registro de remediaciones, resumen de pendientes y persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+Los próximos pasos son resumen de pendientes y persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
