@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import type { Config } from './config.js';
 import { NvdClient } from './nvd/client.js';
+import { registerRemediationRoutes } from './remediations/routes.js';
+import { RemediationService } from './remediations/service.js';
+import { RemediationStore } from './remediations/store.js';
 import { CveCatalog } from './sync/catalog.js';
 import { InitialSync } from './sync/initial-sync.js';
 import { registerSyncRuntime } from './sync/runtime.js';
@@ -20,7 +23,7 @@ const healthSchema = {
 
 export function buildApp(
   config: Config,
-  client: Pick<NvdClient, 'getPage'> = new NvdClient({ apiKey: config.nvdApiKey }),
+  client: Pick<NvdClient, 'getPage' | 'getCve'> = new NvdClient({ apiKey: config.nvdApiKey }),
 ) {
   const app = Fastify({
     logger: config.nodeEnv === 'test' ? false : {
@@ -43,8 +46,11 @@ export function buildApp(
   const sync = new InitialSync(client, catalog);
   app.decorate('catalog', catalog);
   app.decorate('initialSync', sync);
+  const remediations = new RemediationStore();
+  app.decorate('remediations', remediations);
   registerSyncRuntime(app, sync);
   registerVulnerabilityRoutes(app, catalog, sync);
+  registerRemediationRoutes(app, new RemediationService(remediations, client));
 
   app.get('/health/live', { schema: healthSchema }, async () => ({ status: 'ok' }));
   app.get('/health/ready', {

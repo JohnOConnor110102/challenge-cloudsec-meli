@@ -21,6 +21,7 @@ function page(startIndex = 0, totalResults = 1): NvdPage {
 test('ready e inject no inician consultas de red y no informan que el catálogo esté listo', async (t) => {
   let calls = 0;
   const app = buildApp(loadConfig({ NODE_ENV: 'test' }), {
+    async getCve() { throw new Error('Consulta individual no esperada'); },
     async getPage() { calls++; return page(); },
   });
   t.after(() => app.close());
@@ -37,6 +38,7 @@ test('listen carga en segundo plano y readiness pasa a 200 solo después de la �
   const requested = Promise.withResolvers<void>();
   const calls: number[] = [];
   const app = buildApp(loadConfig({ NODE_ENV: 'test' }), {
+    async getCve() { throw new Error('Consulta individual no esperada'); },
     async getPage(options = {}) {
       const start = options.startIndex ?? 0;
       calls.push(start);
@@ -65,6 +67,7 @@ test('un fallo de NVD conserva liveness, readiness 503 y logs sin credenciales n
   const logged = Promise.withResolvers<void>();
   const logs: unknown[] = [];
   const app = buildApp(loadConfig({ NODE_ENV: 'development', LOG_LEVEL: 'silent', NVD_API_KEY: key }), {
+    async getCve() { throw new Error('Consulta individual no esperada'); },
     async getPage() { throw new Error(`private-provider-detail ${key}`); },
   });
   t.after(() => app.close());
