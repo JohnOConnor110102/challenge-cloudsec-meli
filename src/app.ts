@@ -49,7 +49,7 @@ export function buildApp(
   const remediations = new RemediationStore();
   app.decorate('remediations', remediations);
   registerSyncRuntime(app, sync);
-  registerVulnerabilityRoutes(app, catalog, sync);
+  registerVulnerabilityRoutes(app, catalog, sync, remediations);
   registerRemediationRoutes(app, new RemediationService(remediations, client));
 
   app.get('/health/live', { schema: healthSchema }, async () => ({ status: 'ok' }));

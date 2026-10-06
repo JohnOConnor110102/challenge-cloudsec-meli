@@ -126,6 +126,12 @@ Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inic
 curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/summary
 ```
 
+`GET /api/v1/vulnerabilities/pending/summary` devuelve el mismo formato, más `excludedRemediated`, con conteos que excluyen las remediaciones elegibles. Se recalcula sobre datos locales en cada consulta; comparte el `503` durante la carga, los metadatos y `Cache-Control: no-store` del resumen total.
+
+```bash
+curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/pending/summary
+```
+
 ## Registrar una remediación
 
 `PUT /api/v1/remediations/:cveId`, sin cuerpo, devuelve `201` con `Location` al crear y `200` al repetir; ambos devuelven `cveId` y `registeredAt` ([semántica PUT](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.4)). Funciona durante la carga inicial. El router limita el ID a 100 caracteres (`414` si se supera); cuerpos se rechazan (límite de lectura: 1 KiB). Devuelve `400` para entradas inválidas, `404` para CVEs inexistentes, `409` para rechazados y `502`/`503`/`504` ante fallos del proveedor; nunca expone errores crudos y utiliza `Cache-Control: no-store`. El plazo total es de 30 segundos, incluyendo cola y reintentos; desconexión o cierre del servidor cancelan la validación. Cada creación emite un log `remediation_registered` con CVE, fecha y `requestId`; los duplicados no repiten ese evento. El registro y la auditoría persistentes siguen pendientes.
@@ -157,4 +163,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-Los próximos pasos son resumen de pendientes y persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+El próximo paso es persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
