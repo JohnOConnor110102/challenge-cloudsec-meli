@@ -140,6 +140,19 @@ curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/pending/summary
 curl -i -X PUT http://127.0.0.1:3000/api/v1/remediations/CVE-2021-44228
 ```
 
+## PostgreSQL local
+
+Requiere Docker Engine y Compose v2. PostgreSQL 18.6 está fijado por digest, escucha en `127.0.0.1:5432` y conserva datos en un volumen; `DB_LOCAL_PORT` permite cambiar el puerto. `db:up` genera claves locales en `.secrets/` (directorio `700`, archivos `600`, excluidos de Git) y las configura sin mostrarlas. Compose las monta como archivos: no están cifradas en disco; en cloud se usará Secrets Manager. Administración, migraciones y aplicación tienen credenciales distintas; `cve_app` no puede crear tablas ni modificar auditoría.
+
+```bash
+npm run db:up
+npm run db:migrate
+npm run db:test
+npm run db:stop
+```
+
+Migraciones SQL ordenadas, transaccionales, con lock y checksum para impedir modificaciones de las aplicadas. El esquema incluye CVEs, checkpoint, remediaciones y auditoría, sin precargar registros. Remediaciones sin FK al catálogo permiten registrar un CVE antes de recibir su página NVD. `db:test` comprueba permisos y restricciones, revirtiendo sus datos; el job de calidad también ejecuta las migraciones y esta prueba. Este incremento prepara la base; los endpoints todavía usan memoria.
+
 ## Verificación
 
 ```bash
@@ -163,4 +176,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo paso es persistencia. Autenticación/autorización, Docker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento conecta la aplicación con PostgreSQL. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.
