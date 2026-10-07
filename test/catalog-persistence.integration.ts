@@ -11,6 +11,10 @@ import { CatalogCheckpointConflict, PostgresCatalog } from '../src/sync/postgres
 import { InitialSync } from '../src/sync/initial-sync.js';
 import { NvdError } from '../src/nvd/client.js';
 import { buildPersistentApp } from '../src/app.js';
+import { PostgresRemediationStore, RemediationPersistenceError } from '../src/remediations/postgres-store.js';
+import { RemediationService } from '../src/remediations/service.js';
+import { setTimeout as sleep } from 'node:timers/promises';
+import type { RegistrationContext } from '../src/remediations/store.js';
 
 const DATE = '2026-10-05T12:00:00.000';
 const UTC_DATE = `${DATE}Z`;
@@ -47,7 +51,20 @@ test('persistencia transaccional del catálogo con el usuario real de aplicació
     try {
       await pool?.end();
       await owner?.end();
-      if (created) await admin.query(`DROP DATABASE ${identifier} WITH (FORCE)`);
+      if (created) {
+        // pool.end puede resolver antes de que PostgreSQL retire sus sesiones; no forzar su terminación.
+        let connected = true;
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const result = await admin.query<{ connected: boolean }>(
+            'SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = $1) AS connected', [name],
+          );
+          connected = result.rows[0]!.connected;
+          if (!connected) break;
+          await sleep(10);
+        }
+        assert.equal(connected, false, 'Las conexiones de la base de prueba deben cerrarse antes de eliminarla');
+        await admin.query(`DROP DATABASE ${identifier}`);
+      }
     } finally {
       await admin.end();
     }
@@ -70,7 +87,7 @@ test('persistencia transaccional del catálogo con el usuario real de aplicació
   const connection = pool;
   const fixture = owner;
   const catalog = new PostgresCatalog(connection);
-  t.beforeEach(async () => { await fixture.query('TRUNCATE app.cves, app.sync_state'); });
+  t.beforeEach(async () => { await fixture.query('TRUNCATE app.cves, app.sync_state, app.remediations, app.audit_events'); });
 
   await t.test('lee idle y cero registros sin crear un checkpoint al consultar', async () => {
     assert.deepEqual(await catalog.getProgress(), {
@@ -276,7 +293,7 @@ test('persistencia transaccional del catálogo con el usuario real de aplicació
     assert.equal(sync.progress.status, 'completed');
   });
 
-  await t.test('SQL cuenta todas las categorías y excluye solo remediaciones elegibles, sin duplicados ni interpolación', async () => {
+  await t.test('SQL cuenta categorías y excluye solo remediaciones persistidas elegibles, sin alterar el total', async () => {
     const records = [
       cve('CVE-2024-1234', 0), cve('CVE-2024-1235', 1), cve('CVE-2024-1236', 4),
       cve('CVE-2024-1237', 7), cve('CVE-2024-1238', 9.8), cve('CVE-2024-1239'),
@@ -292,15 +309,17 @@ test('persistencia transaccional del catálogo con el usuario real de aplicació
         bySeverity: { none: 1, low: 1, medium: 1, high: 1, critical: 1, unknown: 1 },
       },
     });
-    const pending = await catalog.readSummary([
-      'CVE-2024-1238', 'CVE-2024-1238', 'CVE-2024-1239', 'CVE-2024-1240', 'CVE-2024-9999',
-      "'); DROP TABLE app.cves; --",
-    ]);
+    await fixture.query(`
+      INSERT INTO app.remediations (cve_id) VALUES
+        ('CVE-2024-1238'), ('CVE-2024-1239'), ('CVE-2024-1240'), ('CVE-2024-9999')
+    `);
+    const pending = await catalog.readSummary(true);
     assert.deepEqual(pending.summary, {
       total: 4, excludedRejected: 1, excludedRemediated: 2,
       bySeverity: { none: 1, low: 1, medium: 1, high: 1, critical: 0, unknown: 0 },
     });
     assert.equal((await catalog.getProgress()).storedRecords, 7);
+    assert.equal((await catalog.readSummary()).summary.total, 6);
   });
 
   await t.test('el servidor publica resúmenes SQL y al reabrir recupera completed sin descargar nuevamente', async () => {
@@ -348,10 +367,15 @@ test('persistencia transaccional del catálogo con el usuario real de aplicació
       await reopened.getDecorator<InitialSync>('initialSync').run();
       assert.equal((await reopened.inject('/health/ready')).statusCode, 200);
       assert.equal((await reopened.inject('/api/v1/vulnerabilities/summary')).json().total, 2);
-      // El registro persistente de remediaciones corresponde al próximo incremento.
       const pending = await reopened.inject('/api/v1/vulnerabilities/pending/summary');
-      assert.equal(pending.json().total, 2);
-      assert.equal(pending.json().excludedRemediated, 0);
+      assert.equal(pending.json().total, 1);
+      assert.equal(pending.json().excludedRemediated, 1);
+      const previous = await new PostgresRemediationStore(connection).get('CVE-2024-1234');
+      const repeated = await reopened.inject({ method: 'PUT', url: '/api/v1/remediations/CVE-2024-1234' });
+      assert.equal(repeated.statusCode, 200);
+      assert.deepEqual(repeated.json(), previous);
+      const events = await fixture.query<{ count: string }>('SELECT count(*) FROM app.audit_events');
+      assert.equal(events.rows[0]?.count, '1');
     } finally { await reopened.close(); }
   });
 
@@ -411,5 +435,155 @@ test('persistencia transaccional del catálogo con el usuario real de aplicació
     `, [name]);
     assert.equal(sessions.rows[0]?.count, sessionsBefore.rows[0]?.count,
       'El servidor liberó su pool; solo quedan las conexiones anteriores de la fixture');
+  });
+
+  await t.test('las altas concurrentes conservan fecha y un único evento con el requestId ganador', async () => {
+    const store = new PostgresRemediationStore(connection);
+    assert.equal(await store.get('CVE-2024-1234'), undefined);
+    const contexts = Array.from({ length: 8 }, () => ({ requestId: randomUUID() }));
+    const results = await Promise.all(contexts.map((context) => store.register('CVE-2024-1234', context)));
+    const winner = results.findIndex((result) => result.created);
+    assert.equal(results.filter((result) => result.created).length, 1);
+    for (const result of results) assert.deepEqual(result.remediation, results[winner]!.remediation);
+    const repeated = await store.register('CVE-2024-1234', { requestId: randomUUID() });
+    assert.equal(repeated.created, false);
+    assert.deepEqual(repeated.remediation, results[winner]!.remediation);
+    const events = await fixture.query<{
+      event: string; cve_id: string; request_id: string; occurred_at: Date;
+    }>('SELECT event, cve_id, request_id, occurred_at FROM app.audit_events');
+    assert.equal(events.rows.length, 1);
+    assert.deepEqual(events.rows[0], {
+      event: 'remediation_registered', cve_id: 'CVE-2024-1234',
+      request_id: contexts[winner]!.requestId, occurred_at: new Date(repeated.remediation.registeredAt),
+    });
+    await assert.rejects(connection.query('SELECT * FROM app.audit_events'), { code: '42501' });
+  });
+
+  await t.test('si falla la auditoría se revierte el alta y al recuperar permisos se puede reintentar', async () => {
+    const store = new PostgresRemediationStore(connection);
+    await store.register('CVE-2024-9999', { requestId: randomUUID() });
+    await fixture.query('REVOKE INSERT ON app.audit_events FROM cve_app');
+    try {
+      await assert.rejects(store.register('CVE-2024-1234', { requestId: randomUUID() }), {
+        name: 'RemediationPersistenceError', message: 'No se pudo consultar o guardar la remediación persistida',
+      });
+      assert.equal(await store.get('CVE-2024-1234'), undefined);
+      assert.notEqual(await store.get('CVE-2024-9999'), undefined);
+      const events = await fixture.query<{ count: string }>('SELECT count(*) FROM app.audit_events');
+      assert.equal(events.rows[0]?.count, '1');
+    } finally { await fixture.query('GRANT INSERT ON app.audit_events TO cve_app'); }
+    assert.equal((await store.register('CVE-2024-1234', { requestId: randomUUID() })).created, true);
+  });
+
+  await t.test('una cancelación durante una escritura bloqueada revierte datos y auditoría antes de COMMIT', async () => {
+    const controller = new AbortController();
+    const store = new PostgresRemediationStore(connection);
+    await fixture.query('BEGIN; LOCK TABLE app.remediations IN SHARE MODE');
+    let task: Promise<unknown> | undefined;
+    try {
+      // Adjuntar el rechazo desde el inicio para no producir un unhandledRejection.
+      task = assert.rejects(store.register('CVE-2024-1234', {
+        requestId: randomUUID(), signal: controller.signal,
+      }), { code: 'CANCELLED' });
+      let waiting = false;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const result = await admin.query<{ waiting: boolean }>(`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity WHERE datname = $1
+              AND application_name = 'meli-cloudsec' AND wait_event_type = 'Lock'
+          ) AS waiting
+        `, [name]);
+        if (result.rows[0]?.waiting) { waiting = true; break; }
+        await sleep(10);
+      }
+      assert.equal(waiting, true, 'La escritura debe estar esperando el lock antes de cancelarla');
+      controller.abort();
+    } finally {
+      controller.abort();
+      await fixture.query('COMMIT');
+      await task;
+    }
+    assert.equal(await store.get('CVE-2024-1234'), undefined);
+    assert.equal((await fixture.query<{ count: string }>('SELECT count(*) FROM app.audit_events')).rows[0]?.count, '0');
+  });
+
+  await t.test('rechaza IDs, correlaciones inválidas y señales canceladas sin guardar registros', async () => {
+    const store = new PostgresRemediationStore(connection);
+    const context = { requestId: randomUUID() };
+    await assert.rejects(store.get("'); DROP TABLE app.remediations; --"), { message: 'El ID debe tener formato CVE-AAAA-NNNN' });
+    await assert.rejects(store.register('private-input', context), { message: 'El ID debe tener formato CVE-AAAA-NNNN' });
+    await assert.rejects(store.register('CVE-2024-1234', { requestId: 'private-input' }), { message: 'El requestId debe ser un UUID' });
+    await assert.rejects(store.register('CVE-2024-1234', { ...context, signal: AbortSignal.abort() }), { code: 'CANCELLED' });
+    assert.equal(await store.get('CVE-2024-1234'), undefined);
+    assert.equal((await fixture.query<{ count: string }>('SELECT count(*) FROM app.audit_events')).rows[0]?.count, '0');
+  });
+
+  await t.test('dos instancias HTTP crean una remediación y un evento; una respuesta perdida permite repetir sin NVD', async (t) => {
+    let calls = 0;
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<NvdCve>();
+    const provider = {
+      async getCve() { if (++calls === 2) started.resolve(); return release.promise; },
+      async getPage(): Promise<NvdPage> { assert.fail('Inject no inicia la sincronización'); },
+    };
+    const appConfig = { ...loadConfig({ NODE_ENV: 'test' }), database };
+    const first = await buildPersistentApp(appConfig, provider);
+    t.after(() => first.close());
+    const second = await buildPersistentApp(appConfig, provider);
+    t.after(() => second.close());
+    const requestIds: string[] = [];
+    for (const [index, app] of [first, second].entries()) {
+      app.addHook('onRequest', async (request) => { requestIds[index] = request.id; });
+    }
+    const requests = [first, second].map((app) => app.inject({
+      method: 'PUT', url: '/api/v1/remediations/CVE-2024-1234', headers: { 'x-request-id': 'untrusted-id' },
+    }).then((response) => response));
+    await started.promise;
+    release.resolve(cve());
+    const responses = await Promise.all(requests);
+    assert.deepEqual(responses.map((response) => response.statusCode).sort(), [200, 201]);
+    assert.deepEqual(responses[0]!.json(), responses[1]!.json());
+    const event = await fixture.query<{ request_id: string }>('SELECT request_id FROM app.audit_events');
+    assert.equal(event.rows.length, 1);
+    const winner = responses.findIndex((response) => response.statusCode === 201);
+    assert.equal(event.rows[0]!.request_id, requestIds[winner]);
+    assert.notEqual(event.rows[0]!.request_id, 'untrusted-id');
+    assert.equal(responses[winner]!.headers.location, '/api/v1/remediations/CVE-2024-1234');
+
+    const store = new PostgresRemediationStore(connection);
+    const service = new RemediationService(store, { async getCve(id) { return cve(id); } });
+    // Simular que el COMMIT llegó, pero su confirmación no llegó al llamador.
+    const register = store.register.bind(store);
+    const mock = t.mock.method(store, 'register', async (id: string, context: RegistrationContext) => {
+      await register(id, context); throw new RemediationPersistenceError();
+    });
+    await assert.rejects(service.register('CVE-2024-1235'), RemediationPersistenceError);
+    mock.mock.restore();
+    const noProvider = new RemediationService(new PostgresRemediationStore(connection), {
+      async getCve() { assert.fail('El duplicado confirmado no consulta NVD'); },
+    });
+    assert.equal((await noProvider.register('CVE-2024-1235')).created, false);
+    assert.equal((await fixture.query<{ count: string }>('SELECT count(*) FROM app.audit_events')).rows[0]?.count, '2');
+    assert.equal(calls, 2);
+  });
+
+  await t.test('HTTP no registra CVEs inexistentes o rechazados y oculta fallos de persistencia', async () => {
+    const app = await buildPersistentApp({ ...loadConfig({ NODE_ENV: 'test' }), database }, {
+      async getPage(): Promise<NvdPage> { assert.fail('Inject no inicia la sincronización'); },
+      async getCve(id) { return id === 'CVE-2024-1234' ? null : { ...cve(id), vulnStatus: 'Rejected' }; },
+    });
+    try {
+      assert.equal((await app.inject({ method: 'PUT', url: '/api/v1/remediations/CVE-2024-1234' })).statusCode, 404);
+      assert.equal((await app.inject({ method: 'PUT', url: '/api/v1/remediations/CVE-2024-1235' })).statusCode, 409);
+      assert.equal((await fixture.query<{ count: string }>('SELECT count(*) FROM app.remediations')).rows[0]?.count, '0');
+      assert.equal((await fixture.query<{ count: string }>('SELECT count(*) FROM app.audit_events')).rows[0]?.count, '0');
+      await fixture.query('ALTER TABLE app.remediations RENAME TO remediations_unavailable');
+      try {
+        const response = await app.inject({ method: 'PUT', url: '/api/v1/remediations/CVE-2024-1234' });
+        assert.equal(response.statusCode, 503);
+        assert.deepEqual(response.json(), { error: 'storage_unavailable' });
+        assert.equal(response.headers['cache-control'], 'no-store');
+      } finally { await fixture.query('ALTER TABLE app.remediations_unavailable RENAME TO remediations'); }
+    } finally { await app.close(); }
   });
 });

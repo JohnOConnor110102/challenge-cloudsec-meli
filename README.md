@@ -108,9 +108,9 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 
 [CveCatalog](src/sync/catalog.ts) conserva el adaptador en memoria para pruebas aisladas. El servidor usa `PostgresCatalog`: un registro por ID con fechas, estado y clasificación, incluyendo CVEs sin score y rechazados. Repetir una carga actualiza el registro sin duplicarlo.
 
-[RemediationStore](src/remediations/store.ts) guarda en memoria un registro por CVE y su fecha de registro en UTC, generada por el servidor. Repetirlo devuelve el registro original sin cambiar la fecha; las consultas devuelven copias. Los registros se pierden al reiniciar.
+[PostgresRemediationStore](src/remediations/postgres-store.ts) guarda un registro por CVE con fecha generada por PostgreSQL, devuelta en UTC. Remediación y auditoría se confirman en una transacción: si falla una, se revierte todo. La clave primaria asegura una sola creación ante escrituras concurrentes; los duplicados conservan la fecha y no repiten el evento. `RemediationStore` queda para pruebas en memoria.
 
-[RemediationService](src/remediations/service.ts) valida el ID y consulta NVD antes de cada alta nueva; permite CVEs sin score y rechaza inexistentes o `Rejected` ([criterio CVE](https://www.cve.org/ResourcesSupport/Glossary?activeTerm=glossaryRecord)). Los duplicados devuelven el registro original sin otra consulta. Un fallo del proveedor o cancelación no guarda datos; no se confunde con un CVE inexistente. Comparte los límites y reintentos del cliente NVD y no modifica el catálogo de la sincronización.
+[RemediationService](src/remediations/service.ts) valida el ID y consulta NVD antes de cada alta nueva; permite CVEs sin score y rechaza inexistentes o `Rejected` ([criterio CVE](https://www.cve.org/ResourcesSupport/Glossary?activeTerm=glossaryRecord)). Los duplicados devuelven el registro persistido sin otra consulta, también después de reiniciar. Un fallo del proveedor no guarda datos; no se confunde con un CVE inexistente. Comparte los límites y reintentos del cliente NVD y no modifica el catálogo de la sincronización.
 
 `catalog.summary()` calcula los conteos sobre los registros actuales, incluyendo categorías en cero. `total` suma `none`, `low`, `medium`, `high`, `critical` y `unknown`; `excludedRejected` informa los rechazados aparte. El cálculo es local, recorre el catálogo sin copiarlo completo y devuelve un resultado independiente.
 
@@ -128,7 +128,7 @@ Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inic
 curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/summary
 ```
 
-`GET /api/v1/vulnerabilities/pending/summary` devuelve el mismo formato, más `excludedRemediated`, con conteos que excluyen las remediaciones elegibles. Ambos resúmenes agrupan en SQL y leen estado, fecha y conteos en una misma consulta; no cargan el catálogo completo en Node. Si falla el almacenamiento devuelven `503` con `error: storage_unavailable`, sin detalles internos. Los IDs de remediaciones todavía en memoria se envían como un parámetro SQL; su persistencia corresponde al siguiente incremento.
+`GET /api/v1/vulnerabilities/pending/summary` devuelve el mismo formato, más `excludedRemediated`, con conteos que excluyen las remediaciones elegibles. Ambos resúmenes agrupan en SQL y leen estado, fecha, conteos y remediaciones persistidas en una misma consulta; no cargan el catálogo completo ni listas de IDs en Node. Si falla el almacenamiento devuelven `503` con `error: storage_unavailable`, sin detalles internos.
 
 ```bash
 curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/pending/summary
@@ -136,7 +136,9 @@ curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/pending/summary
 
 ## Registrar una remediación
 
-`PUT /api/v1/remediations/:cveId`, sin cuerpo, devuelve `201` con `Location` al crear y `200` al repetir; ambos devuelven `cveId` y `registeredAt` ([semántica PUT](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.4)). Funciona durante la carga inicial. El router limita el ID a 100 caracteres (`414` si se supera); cuerpos se rechazan (límite de lectura: 1 KiB). Devuelve `400` para entradas inválidas, `404` para CVEs inexistentes, `409` para rechazados y `502`/`503`/`504` ante fallos del proveedor; nunca expone errores crudos y utiliza `Cache-Control: no-store`. El plazo total es de 30 segundos, incluyendo cola y reintentos; desconexión o cierre del servidor cancelan la validación. Cada creación emite un log `remediation_registered` con CVE, fecha y `requestId`; los duplicados no repiten ese evento. El registro y la auditoría persistentes siguen pendientes.
+`PUT /api/v1/remediations/:cveId`, sin cuerpo, devuelve `201` con `Location` al crear y `200` al repetir; ambos devuelven `cveId` y `registeredAt` ([semántica PUT](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.4)). Funciona durante la carga inicial. El router limita el ID a 100 caracteres (`414` si se supera); cuerpos se rechazan (límite de lectura: 1 KiB). Devuelve `400` para entradas inválidas, `404` para CVEs inexistentes, `409` para rechazados y `502`/`503`/`504` ante fallos del proveedor; un fallo de persistencia devuelve `503 storage_unavailable`. Nunca expone errores crudos y utiliza `Cache-Control: no-store`. Cada creación guarda un evento y emite un log `remediation_registered` con CVE, fecha y `requestId` generado por el servidor; los duplicados no los repiten. El rol de aplicación solo puede insertar auditoría; su consulta restringida se incorporará con autorización.
+
+El plazo de 30 segundos incluye validación y persistencia. Se comprueba cancelación entre consultas SQL y antes de `COMMIT`, con rollback si corresponde; una consulta ya enviada conserva sus timeouts de DB. Si `COMMIT` comenzó o su respuesta se pierde, la operación puede haber quedado confirmada: repetir el PUT recupera el registro sin duplicar auditoría.
 
 ```bash
 curl -i -X PUT http://127.0.0.1:3000/api/v1/remediations/CVE-2021-44228
@@ -188,4 +190,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo incremento persiste remediaciones y auditoría. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.
+La persistencia de catálogo, checkpoint, remediaciones y auditoría está implementada. Autenticación/autorización, consulta restringida de auditoría, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.

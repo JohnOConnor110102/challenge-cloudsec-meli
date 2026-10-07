@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { NvdError } from '../nvd/client.js';
 import { RemediationError } from './service.js';
 import type { RemediationService } from './service.js';
+import { RemediationPersistenceError } from './postgres-store.js';
 
 const remediationSchema = {
   type: 'object', additionalProperties: false, required: ['cveId', 'registeredAt'],
@@ -34,6 +35,10 @@ export function registerRemediationRoutes(app: FastifyInstance, service: Remedia
       if (request.body !== undefined) return reply.code(400).send({ error: 'invalid_request' });
     },
     errorHandler(error, request, reply) {
+      if (error instanceof RemediationPersistenceError) {
+        request.log.error({ event: 'remediation_storage_failed' }, 'Falló la persistencia de remediación');
+        return reply.code(503).send({ error: 'storage_unavailable' });
+      }
       if (error instanceof RemediationError) {
         const failures = {
           INVALID_CVE_ID: { status: 400, error: 'invalid_cve_id' },
@@ -65,7 +70,7 @@ export function registerRemediationRoutes(app: FastifyInstance, service: Remedia
     const deadline = setTimeout(() => { timedOut = true; controller.abort(); }, 30_000);
     deadline.unref();
     try {
-      const result = await service.register(request.params.cveId, { signal });
+      const result = await service.register(request.params.cveId, { signal, requestId: request.id });
       if (result.created) {
         request.log.info({
           event: 'remediation_registered', requestId: request.id,

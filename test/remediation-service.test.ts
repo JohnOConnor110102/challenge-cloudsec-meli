@@ -97,11 +97,16 @@ test('consultas concurrentes completadas en distinto orden crean un único regis
   const secondQuery = Promise.withResolvers<NvdCve>();
   const store = new RemediationStore(() => new Date(DATE));
   let calls = 0;
+  const started = Promise.withResolvers<void>();
   const service = new RemediationService(store, {
-    async getCve() { return ++calls === 1 ? firstQuery.promise : secondQuery.promise; },
+    async getCve() {
+      if (++calls === 2) started.resolve();
+      return calls === 1 ? firstQuery.promise : secondQuery.promise;
+    },
   });
   const first = service.register(ID);
   const second = service.register(ID);
+  await started.promise;
   assert.equal(calls, 2);
   assert.equal(store.size, 0);
   secondQuery.resolve(cve());
@@ -131,17 +136,56 @@ test('cancelar durante la consulta impide registrar incluso si el proveedor devu
   const pending = Promise.withResolvers<NvdCve>();
   const store = new RemediationStore();
   const controller = new AbortController();
+  const started = Promise.withResolvers<void>();
   const service = new RemediationService(store, {
     async getCve(_id, options = {}) {
       assert.equal(options.signal, controller.signal);
+      started.resolve();
       return pending.promise;
     },
   });
   const task = service.register(ID, { signal: controller.signal });
+  await started.promise;
   controller.abort();
   pending.resolve(cve());
   await assert.rejects(task, { name: 'NvdError', code: 'CANCELLED' });
   assert.equal(store.size, 0);
+});
+
+test('propaga requestId y cancelación al repositorio y espera la persistencia antes de informar una creación', async () => {
+  const saved = Promise.withResolvers<ReturnType<RemediationStore['register']>>();
+  const started = Promise.withResolvers<void>();
+  const requestId = '88a5e984-4d5d-4a14-8e79-651efc00e653';
+  const controller = new AbortController();
+  const service = new RemediationService({
+    async get() { return undefined; },
+    async register(id, context) {
+      assert.equal(id, ID);
+      assert.deepEqual(context, { requestId, signal: controller.signal });
+      started.resolve(); return saved.promise;
+    },
+  }, { async getCve() { return cve(); } });
+  let finished = false;
+  const task = service.register(ID, { requestId, signal: controller.signal }).then((result) => {
+    finished = true; return result;
+  });
+  await started.promise;
+  assert.equal(finished, false);
+  saved.resolve({ created: true, remediation: { cveId: ID, registeredAt: DATE } });
+  assert.equal((await task).created, true);
+});
+
+test('cancelar mientras se lee una remediación impide consultar NVD o devolver el duplicado', async () => {
+  const existing = Promise.withResolvers<ReturnType<RemediationStore['get']>>();
+  const controller = new AbortController();
+  const service = new RemediationService({
+    get: () => existing.promise,
+    register() { assert.fail('No debe guardar'); },
+  }, { async getCve() { assert.fail('No debe consultar NVD'); } });
+  const task = service.register(ID, { signal: controller.signal });
+  controller.abort();
+  existing.resolve({ cveId: ID, registeredAt: DATE });
+  await assert.rejects(task, { code: 'CANCELLED' });
 });
 
 test('el servicio integrado con el cliente rechaza una respuesta con otro CVE sin escribir', async () => {

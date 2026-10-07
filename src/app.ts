@@ -7,6 +7,7 @@ import { NvdClient } from './nvd/client.js';
 import { registerRemediationRoutes } from './remediations/routes.js';
 import { RemediationService } from './remediations/service.js';
 import { RemediationStore } from './remediations/store.js';
+import { PostgresRemediationStore } from './remediations/postgres-store.js';
 import { CveCatalog } from './sync/catalog.js';
 import { InitialSync } from './sync/initial-sync.js';
 import { PostgresCatalog } from './sync/postgres-catalog.js';
@@ -50,18 +51,18 @@ export function buildApp(
   const sync = new InitialSync(client, catalog);
   app.decorate<CveCatalog | PostgresCatalog>('catalog', catalog);
   app.decorate('initialSync', sync);
-  const remediations = new RemediationStore();
-  app.decorate('remediations', remediations);
+  const remediations = pool === undefined ? new RemediationStore() : new PostgresRemediationStore(pool);
+  app.decorate<RemediationStore | PostgresRemediationStore>('remediations', remediations);
   // onClose ejecuta los hooks en orden inverso: esperar la sincronización antes de cerrar el pool.
   if (pool !== undefined) app.addHook('onClose', async () => { await pool.end(); });
   registerSyncRuntime(app, sync);
   registerVulnerabilityRoutes(app, sync, async (pending) => {
     if (catalog instanceof PostgresCatalog) {
-      return catalog.readSummary(pending ? [...remediations.ids()] : []);
+      return catalog.readSummary(pending);
     }
     return {
       status: sync.progress.status, lastPageTimestamp: sync.progress.lastPageTimestamp,
-      summary: pending ? catalog.pendingSummary((id) => remediations.has(id))
+      summary: pending ? catalog.pendingSummary((id) => remediations instanceof RemediationStore && remediations.has(id))
         : { ...catalog.summary(), excludedRemediated: 0 },
     };
   });

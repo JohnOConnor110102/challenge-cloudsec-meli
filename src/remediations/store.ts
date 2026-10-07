@@ -10,7 +10,17 @@ export interface RemediationRegistration {
   remediation: Remediation;
 }
 
-export class RemediationStore {
+export interface RegistrationContext {
+  requestId: string;
+  signal?: AbortSignal;
+}
+
+export interface RemediationRepository {
+  get(cveId: string): Remediation | undefined | Promise<Remediation | undefined>;
+  register(cveId: string, context: RegistrationContext): RemediationRegistration | Promise<RemediationRegistration>;
+}
+
+export class RemediationStore implements RemediationRepository {
   readonly #records = new Map<string, Remediation>();
   readonly #now: () => Date;
 
@@ -24,10 +34,6 @@ export class RemediationStore {
 
   has(cveId: string): boolean {
     return this.#records.has(cveId);
-  }
-
-  ids(): IterableIterator<string> {
-    return this.#records.keys();
   }
 
   get(cveId: string): Remediation | undefined {

@@ -43,7 +43,7 @@ function progress(row: ProgressRow): SyncProgress {
 export class PostgresCatalog implements SyncStore {
   constructor(private readonly pool: Pool) {}
 
-  async readSummary(remediatedIds: readonly string[] = []): Promise<SummarySnapshot> {
+  async readSummary(pending = false): Promise<SummarySnapshot> {
     try {
       // Estado y conteos comparten una instantánea; el catálogo permanece en PostgreSQL.
       const result = await this.pool.query<{
@@ -55,15 +55,15 @@ export class PostgresCatalog implements SyncStore {
         count: string | null;
       }>(`
         WITH counts AS (
-          SELECT classification_status, severity, id = ANY($1::text[]) AS remediated, count(*) AS count
-          FROM app.cves
-          GROUP BY classification_status, severity, id = ANY($1::text[])
+          SELECT classification_status, severity, ($1::boolean AND r.cve_id IS NOT NULL) AS remediated, count(*) AS count
+          FROM app.cves AS c LEFT JOIN app.remediations AS r ON r.cve_id = c.id
+          GROUP BY classification_status, severity, ($1::boolean AND r.cve_id IS NOT NULL)
         )
         SELECT state.status, state.last_page_timestamp, counts.*
         FROM (VALUES (1)) AS singleton(id)
         LEFT JOIN app.sync_state AS state USING (id)
         LEFT JOIN counts ON true
-      `, [remediatedIds]);
+      `, [pending]);
       const summary: PendingVulnerabilitySummary = {
         total: 0, excludedRejected: 0, excludedRemediated: 0,
         bySeverity: { none: 0, low: 0, medium: 0, high: 0, critical: 0, unknown: 0 },
