@@ -15,7 +15,7 @@
     "db:up": "tsx src/db/local.ts up",
     "db:migrate": "tsx src/db/local.ts migrate",
     "db:test": "tsx src/db/local.ts test",
-    "db:test:node": "node --env-file-if-exists=.env --import tsx --test test/database.integration.ts",
+    "db:test:node": "node --env-file-if-exists=.env --import tsx --test test/database.integration.ts test/catalog-persistence.integration.ts",
     "db:check": "tsx --env-file-if-exists=.env src/db/check.ts",
     "db:stop": "tsx src/db/local.ts stop"
   },

@@ -159,6 +159,8 @@ Node usa [pg](https://node-postgres.com/apis/pool) sin ORM, como `cve_app`: pool
 
 Si ya creaste la red anterior, ejecutá `docker compose down` y luego `npm run db:up` para recrearla conservando el volumen.
 
+[PostgresCatalog](src/sync/postgres-catalog.ts) guarda cada página y su checkpoint en una transacción, con upsert por ID, fechas UTC y lock para rechazar escrituras con un checkpoint desactualizado. `getProgress()` recupera el estado tras reconectar; un total final inconsistente marca `failed` y reinicia el índice. Las pruebas crean y eliminan una base temporal propia, usando la credencial local de administración solo para prepararla. La conexión con `InitialSync` sigue pendiente.
+
 ## Verificación
 
 ```bash
@@ -182,4 +184,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo incremento guarda el catálogo y sus checkpoints en PostgreSQL. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento conecta `InitialSync` con el catálogo persistente. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.

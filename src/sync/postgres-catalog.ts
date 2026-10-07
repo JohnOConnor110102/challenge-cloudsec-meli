@@ -1,0 +1,125 @@
+import type { Pool, PoolClient } from 'pg';
+import { classifyCve } from '../cvss/classification.js';
+import type { NvdPage } from '../nvd/validation.js';
+import { parseNvdPage } from '../nvd/validation.js';
+import type { SyncProgress } from './initial-sync.js';
+
+interface ProgressRow {
+  status: SyncProgress['status'] | null;
+  next_start_index: string | null;
+  total_results: string | null;
+  stored_records: string;
+  last_page_timestamp: Date | null;
+}
+
+function count(value: string): number {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) throw new Error('Conteo persistido inválido');
+  return number;
+}
+
+// NVD también devuelve fechas UTC sin sufijo: explicitarlo antes de enviarlas a PostgreSQL.
+function utc(value: string): string {
+  return /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
+}
+
+export class CatalogCheckpointConflict extends Error {
+  constructor() {
+    super('La página no corresponde al checkpoint persistido');
+    this.name = 'CatalogCheckpointConflict';
+  }
+}
+
+export class PostgresCatalog {
+  constructor(private readonly pool: Pool) {}
+
+  async getProgress(): Promise<SyncProgress> {
+    try {
+      // Una sola consulta lee datos y checkpoint desde la misma instantánea local.
+      const result = await this.pool.query<ProgressRow>(`
+        SELECT state.status, state.next_start_index, state.total_results, state.last_page_timestamp,
+          (SELECT count(*) FROM app.cves) AS stored_records
+        FROM (VALUES (1)) AS singleton(id)
+        LEFT JOIN app.sync_state AS state USING (id)
+      `);
+      const row = result.rows[0]!;
+      return {
+        status: row.status ?? 'idle', nextStartIndex: count(row.next_start_index ?? '0'),
+        totalResults: row.total_results === null ? null : count(row.total_results),
+        storedRecords: count(row.stored_records), lastPageTimestamp: row.last_page_timestamp?.toISOString() ?? null,
+      };
+    } catch {
+      throw new Error('No se pudo leer el progreso persistido');
+    }
+  }
+
+  async savePage(input: NvdPage): Promise<SyncProgress> {
+    // Reutilizar la validación del cliente en la frontera de persistencia.
+    const page = parseNvdPage({
+      format: 'NVD_CVE', version: '2.0', startIndex: input.startIndex,
+      resultsPerPage: input.resultsPerPage, totalResults: input.totalResults,
+      timestamp: input.timestamp, vulnerabilities: input.cves.map((cve) => ({ cve })),
+    });
+    const records = page.cves.map((cve) => {
+      const classification = classifyCve(cve);
+      return {
+        id: cve.id, published: utc(cve.published), last_modified: utc(cve.lastModified),
+        vuln_status: cve.vulnStatus, classification_status: classification.status,
+        severity: classification.severity, metric: classification.metric,
+      };
+    });
+    let client: PoolClient | undefined;
+    let destroy = false;
+    try {
+      client = await this.pool.connect();
+      await client.query('BEGIN');
+      await client.query(`
+        INSERT INTO app.sync_state (id, status, next_start_index)
+        VALUES (1, 'idle', 0) ON CONFLICT (id) DO NOTHING
+      `);
+      const checkpoint = await client.query<{ next_start_index: string }>(
+        'SELECT next_start_index FROM app.sync_state WHERE id = 1 FOR UPDATE',
+      );
+      if (count(checkpoint.rows[0]!.next_start_index) !== page.startIndex) {
+        throw new CatalogCheckpointConflict();
+      }
+      // Un único upsert por página; todos los valores viajan como parámetros.
+      await client.query(`
+        INSERT INTO app.cves (id, published, last_modified, vuln_status, classification_status, severity, metric)
+        SELECT id, published, last_modified, vuln_status, classification_status, severity, metric
+        FROM jsonb_to_recordset($1::jsonb) AS records (
+          id text, published timestamptz, last_modified timestamptz, vuln_status text,
+          classification_status text, severity text, metric jsonb
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          published = EXCLUDED.published, last_modified = EXCLUDED.last_modified,
+          vuln_status = EXCLUDED.vuln_status, classification_status = EXCLUDED.classification_status,
+          severity = EXCLUDED.severity, metric = EXCLUDED.metric
+      `, [JSON.stringify(records)]);
+      const result = await client.query<{ count: string }>('SELECT count(*) FROM app.cves');
+      const storedRecords = count(result.rows[0]!.count);
+      const next = page.startIndex + page.cves.length;
+      const status = next < page.totalResults ? 'running'
+        : storedRecords === page.totalResults ? 'completed' : 'failed';
+      const nextStartIndex = status === 'failed' ? 0 : next;
+      await client.query(`
+        UPDATE app.sync_state SET status = $1, next_start_index = $2, total_results = $3,
+          last_page_timestamp = $4, updated_at = now() WHERE id = 1
+      `, [status, nextStartIndex, page.totalResults, utc(page.timestamp)]);
+      const progress: SyncProgress = {
+        status, nextStartIndex, totalResults: page.totalResults, storedRecords,
+        lastPageTimestamp: new Date(utc(page.timestamp)).toISOString(),
+      };
+      await client.query('COMMIT');
+      return progress;
+    } catch (error) {
+      if (client !== undefined) {
+        try { await client.query('ROLLBACK'); } catch { destroy = true; }
+      }
+      if (error instanceof CatalogCheckpointConflict) throw error;
+      throw new Error('No se pudo guardar la página y su checkpoint');
+    } finally {
+      client?.release(destroy);
+    }
+  }
+}
