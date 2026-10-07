@@ -2,7 +2,7 @@
 
 ## Ejecutar localmente
 
-Requisitos: **Node.js 24.21.0** y npm. La versión de Node está fijada en `.nvmrc`.
+Requisitos: **Node.js 24.21.0**, npm, Docker Engine y Compose v2. La versión de Node está fijada en `.nvmrc`.
 
 ```bash
 nvm install
@@ -14,6 +14,8 @@ Instalar y ejecutar en desarrollo:
 ```bash
 npm ci --ignore-scripts
 cp .env.example .env
+npm run db:up
+npm run db:migrate
 npm run dev
 ```
 
@@ -37,14 +39,14 @@ curl -i http://127.0.0.1:3000/health/live
 curl -i http://127.0.0.1:3000/health/ready
 ```
 
-`live` devuelve HTTP `200` con `{"status":"ok"}`. `ready` devuelve `503` con `{"status":"not_ready"}` durante la carga o si falla, y `200` cuando se completa.
+`live` devuelve HTTP `200` con `{"status":"ok"}`. `ready` devuelve `503` con `{"status":"not_ready"}` durante la carga, si falla o si PostgreSQL no está disponible; devuelve `200` cuando el catálogo está completo y su estado se puede consultar.
 
 | Ruta                | Significado en esta entrega          |
 | ------------------- | ------------------------------------ |
 | `GET /health/live`  | El proceso responde solicitudes HTTP |
-| `GET /health/ready` | El catálogo NVD terminó de cargarse  |
+| `GET /health/ready` | Catálogo completo y PostgreSQL disponible |
 
-La carga NVD comienza en segundo plano al escuchar HTTP. Los health checks consultan el estado local y no hacen solicitudes a NVD. Al cerrar, se cancela la carga y se esperan las solicitudes HTTP en curso.
+La carga NVD comienza en segundo plano al escuchar HTTP. Los health checks no hacen solicitudes a NVD; `ready` consulta PostgreSQL. Al cerrar, se cancela la carga, se esperan las solicitudes HTTP y la sincronización antes de liberar el pool.
 
 ## Configuración
 
@@ -102,9 +104,9 @@ JS
 
 El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el catálogo completo. Para probar sin key, dejar `NVD_API_KEY` sin definir.
 
-## Catálogo en memoria
+## Catálogo y sincronización
 
-[CveCatalog](src/sync/catalog.ts) guarda un registro por ID con sus fechas, estado y clasificación. Cada carga reemplaza el registro anterior y recalcula su severidad; conserva también CVEs sin score y rechazados. Las consultas devuelven copias. El catálogo inicia vacío y se pierde al reiniciar.
+[CveCatalog](src/sync/catalog.ts) conserva el adaptador en memoria para pruebas aisladas. El servidor usa `PostgresCatalog`: un registro por ID con fechas, estado y clasificación, incluyendo CVEs sin score y rechazados. Repetir una carga actualiza el registro sin duplicarlo.
 
 [RemediationStore](src/remediations/store.ts) guarda en memoria un registro por CVE y su fecha de registro en UTC, generada por el servidor. Repetirlo devuelve el registro original sin cambiar la fecha; las consultas devuelven copias. Los registros se pierden al reiniciar.
 
@@ -114,9 +116,9 @@ El comando hace dos consultas pequeñas, respetando la pausa, y no descarga el c
 
 `catalog.pendingSummary(id => remediations.has(id))` excluye las remediaciones del catálogo vigente y devuelve `excludedRemediated`; los `Rejected` siguen separados. Remediaciones fuera del catálogo no restan. Se cumple `total = pendientes + remediadas elegibles`, también por severidad, usando la clasificación actual. Recorre los datos una vez sin copiarlos completos.
 
-[InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` cancelando la consulta o espera y expone el progreso. Guarda checkpoints en memoria; llamadas simultáneas comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. La carga no representa una instantánea atómica de NVD.
+[InitialSync](src/sync/initial-sync.ts) carga páginas con `run()`, pausa con `stop()` cancelando la consulta o espera y expone el progreso. Guarda checkpoints en PostgreSQL; llamadas simultáneas en una instancia comparten la carga. Si los IDs únicos no coinciden con el total final, falla y el próximo intento recorre desde cero. La carga no representa una instantánea atómica de NVD.
 
-Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inicio, progreso cada 5 segundos y resultado, sin keys ni detalles crudos del proveedor. Un fallo mantiene `ready` en `503` después de los reintentos del cliente. `SIGINT`/`SIGTERM` cancelan la carga; reiniciar vuelve a cargar desde cero. La descarga completa puede tardar varios minutos por los límites de NVD.
+Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inicio, progreso cada 5 segundos y resultado, sin keys ni detalles crudos del proveedor. Un fallo mantiene `ready` en `503` después de los reintentos del cliente. `SIGINT`/`SIGTERM` cancelan la carga; reiniciar recupera el checkpoint y un catálogo `completed` evita otra descarga. La descarga completa puede tardar varios minutos por los límites de NVD.
 
 ## Resumen total
 
@@ -126,7 +128,7 @@ Al iniciar HTTP, [runtime](src/sync/runtime.ts) ejecuta la carga y registra inic
 curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/summary
 ```
 
-`GET /api/v1/vulnerabilities/pending/summary` devuelve el mismo formato, más `excludedRemediated`, con conteos que excluyen las remediaciones elegibles. Se recalcula sobre datos locales en cada consulta; comparte el `503` durante la carga, los metadatos y `Cache-Control: no-store` del resumen total.
+`GET /api/v1/vulnerabilities/pending/summary` devuelve el mismo formato, más `excludedRemediated`, con conteos que excluyen las remediaciones elegibles. Ambos resúmenes agrupan en SQL y leen estado, fecha y conteos en una misma consulta; no cargan el catálogo completo en Node. Si falla el almacenamiento devuelven `503` con `error: storage_unavailable`, sin detalles internos. Los IDs de remediaciones todavía en memoria se envían como un parámetro SQL; su persistencia corresponde al siguiente incremento.
 
 ```bash
 curl -i http://127.0.0.1:3000/api/v1/vulnerabilities/pending/summary
@@ -153,7 +155,7 @@ npm run db:test:node
 npm run db:stop
 ```
 
-Migraciones SQL ordenadas, transaccionales, con lock y checksum para impedir modificaciones de las aplicadas. El esquema incluye CVEs, checkpoint, remediaciones y auditoría, sin precargar registros. Remediaciones sin FK al catálogo permiten registrar un CVE antes de recibir su página NVD. `db:test` comprueba permisos y restricciones, revirtiendo sus datos; el job de calidad también ejecuta las migraciones y esta prueba. Este incremento prepara la base; los endpoints todavía usan memoria.
+Migraciones SQL ordenadas, transaccionales, con lock y checksum para impedir modificaciones de las aplicadas. El esquema incluye CVEs, checkpoint, remediaciones y auditoría, sin precargar registros. Remediaciones sin FK al catálogo permiten registrar un CVE antes de recibir su página NVD. `db:test` comprueba permisos y restricciones, revirtiendo sus datos; el job de calidad también ejecuta las migraciones y esta prueba. El servidor requiere la conexión y el esquema antes de escuchar HTTP; las migraciones se ejecutan por separado con su propio rol.
 
 Node usa [pg](https://node-postgres.com/apis/pool) sin ORM, como `cve_app`: pool máximo de cinco, conexión 5 s y consulta 10 s (servidor)/12 s (cliente). `DB_PASSWORD_FILE` apunta al secreto privado; `DB_HOST`, `DB_PORT` y `DB_NAME` configuran el destino. `DB_TLS=verify-full` valida certificado e identidad, con `DB_CA_FILE` opcional; sin TLS solo se permite loopback de desarrollo/test. Compose usa bridge con puerto loopback; si cambiás `DB_LOCAL_PORT`, igualá `DB_PORT`. `db:check` verifica conexión/esquema y `db:test:node` prueba el driver en local y CI.
 
@@ -161,7 +163,7 @@ Si ya creaste la red anterior, ejecutá `docker compose down` y luego `npm run d
 
 [PostgresCatalog](src/sync/postgres-catalog.ts) guarda cada página y su checkpoint en una transacción, con upsert por ID, fechas UTC y lock para rechazar escrituras con un checkpoint desactualizado. `getProgress()` recupera el estado tras reconectar; un total final inconsistente marca `failed` y reinicia el índice. Las pruebas crean y eliminan una base temporal propia, usando la credencial local de administración solo para prepararla.
 
-`InitialSync` acepta este repositorio mediante `SyncStore`: recupera el checkpoint al ejecutar, persiste `running`/`paused`/`failed` y evita recargar un catálogo `completed`. Confirma la página antes de avanzar; una parada durante el guardado conserva lo confirmado. Actualizar el estado exige el índice esperado y nunca rebaja `completed`. El adaptador `MemorySyncStore` conserva el funcionamiento actual de la API; conectar el servidor y sus resúmenes a PostgreSQL es el próximo incremento.
+`InitialSync` acepta este repositorio mediante `SyncStore`: recupera el checkpoint al ejecutar, persiste `running`/`paused`/`failed` y evita recargar un catálogo `completed`. Confirma la página antes de avanzar; una parada durante el guardado conserva lo confirmado. Actualizar el estado exige el índice esperado y nunca rebaja `completed`. `buildPersistentApp` abre el pool del servidor; `buildApp` sin pool y `MemorySyncStore` permiten probar sin PostgreSQL.
 
 ## Verificación
 
@@ -186,4 +188,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo incremento conecta el servidor y sus resúmenes con PostgreSQL. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento persiste remediaciones y auditoría. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.

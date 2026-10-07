@@ -26,6 +26,10 @@ export class RemediationStore {
     return this.#records.has(cveId);
   }
 
+  ids(): IterableIterator<string> {
+    return this.#records.keys();
+  }
+
   get(cveId: string): Remediation | undefined {
     const record = this.#records.get(cveId);
     return record === undefined ? undefined : { ...record };

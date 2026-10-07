@@ -3,6 +3,8 @@ import { classifyCve } from '../cvss/classification.js';
 import type { NvdPage } from '../nvd/validation.js';
 import { parseNvdPage } from '../nvd/validation.js';
 import type { SyncProgress, SyncStore } from './initial-sync.js';
+import type { SummarySnapshot } from '../vulnerabilities/reader.js';
+import type { PendingVulnerabilitySummary } from '../vulnerabilities/pending-summary.js';
 
 interface ProgressRow {
   status: SyncProgress['status'] | null;
@@ -40,6 +42,51 @@ function progress(row: ProgressRow): SyncProgress {
 
 export class PostgresCatalog implements SyncStore {
   constructor(private readonly pool: Pool) {}
+
+  async readSummary(remediatedIds: readonly string[] = []): Promise<SummarySnapshot> {
+    try {
+      // Estado y conteos comparten una instantánea; el catálogo permanece en PostgreSQL.
+      const result = await this.pool.query<{
+        status: SyncProgress['status'] | null;
+        last_page_timestamp: Date | null;
+        classification_status: string | null;
+        severity: keyof PendingVulnerabilitySummary['bySeverity'] | null;
+        remediated: boolean | null;
+        count: string | null;
+      }>(`
+        WITH counts AS (
+          SELECT classification_status, severity, id = ANY($1::text[]) AS remediated, count(*) AS count
+          FROM app.cves
+          GROUP BY classification_status, severity, id = ANY($1::text[])
+        )
+        SELECT state.status, state.last_page_timestamp, counts.*
+        FROM (VALUES (1)) AS singleton(id)
+        LEFT JOIN app.sync_state AS state USING (id)
+        LEFT JOIN counts ON true
+      `, [remediatedIds]);
+      const summary: PendingVulnerabilitySummary = {
+        total: 0, excludedRejected: 0, excludedRemediated: 0,
+        bySeverity: { none: 0, low: 0, medium: 0, high: 0, critical: 0, unknown: 0 },
+      };
+      for (const row of result.rows) {
+        if (row.count === null) continue;
+        const amount = count(row.count);
+        if (row.classification_status === 'rejected') summary.excludedRejected += amount;
+        else if (row.remediated) summary.excludedRemediated += amount;
+        else {
+          summary.total += amount;
+          summary.bySeverity[row.severity!] += amount;
+        }
+      }
+      const state = result.rows[0]!;
+      return {
+        status: state.status ?? 'idle', lastPageTimestamp: state.last_page_timestamp?.toISOString() ?? null,
+        summary,
+      };
+    } catch {
+      throw new Error('No se pudo leer el resumen persistido');
+    }
+  }
 
   async getProgress(): Promise<SyncProgress> {
     try {

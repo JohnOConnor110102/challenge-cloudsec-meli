@@ -10,6 +10,7 @@ import type { NvdCve, NvdPage } from '../src/nvd/validation.js';
 import { CatalogCheckpointConflict, PostgresCatalog } from '../src/sync/postgres-catalog.js';
 import { InitialSync } from '../src/sync/initial-sync.js';
 import { NvdError } from '../src/nvd/client.js';
+import { buildPersistentApp } from '../src/app.js';
 
 const DATE = '2026-10-05T12:00:00.000';
 const UTC_DATE = `${DATE}Z`;
@@ -273,5 +274,142 @@ test('persistencia transaccional del catálogo con el usuario real de aplicació
     assert.deepEqual(calls, [0, 1]);
     assert.equal(sync.progress.storedRecords, 2);
     assert.equal(sync.progress.status, 'completed');
+  });
+
+  await t.test('SQL cuenta todas las categorías y excluye solo remediaciones elegibles, sin duplicados ni interpolación', async () => {
+    const records = [
+      cve('CVE-2024-1234', 0), cve('CVE-2024-1235', 1), cve('CVE-2024-1236', 4),
+      cve('CVE-2024-1237', 7), cve('CVE-2024-1238', 9.8), cve('CVE-2024-1239'),
+      { ...cve('CVE-2024-1240', 9.8), vulnStatus: 'Rejected' },
+    ];
+    await catalog.savePage(page(0, records.slice(0, 2), 7));
+    assert.equal((await catalog.readSummary()).status, 'running');
+    await catalog.savePage(page(2, records.slice(2), 7));
+    assert.deepEqual(await catalog.readSummary(), {
+      status: 'completed', lastPageTimestamp: UTC_DATE,
+      summary: {
+        total: 6, excludedRejected: 1, excludedRemediated: 0,
+        bySeverity: { none: 1, low: 1, medium: 1, high: 1, critical: 1, unknown: 1 },
+      },
+    });
+    const pending = await catalog.readSummary([
+      'CVE-2024-1238', 'CVE-2024-1238', 'CVE-2024-1239', 'CVE-2024-1240', 'CVE-2024-9999',
+      "'); DROP TABLE app.cves; --",
+    ]);
+    assert.deepEqual(pending.summary, {
+      total: 4, excludedRejected: 1, excludedRemediated: 2,
+      bySeverity: { none: 1, low: 1, medium: 1, high: 1, critical: 0, unknown: 0 },
+    });
+    assert.equal((await catalog.getProgress()).storedRecords, 7);
+  });
+
+  await t.test('el servidor publica resúmenes SQL y al reabrir recupera completed sin descargar nuevamente', async () => {
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<NvdPage>();
+    const appConfig = { ...loadConfig({ NODE_ENV: 'test' }), database };
+    const app = await buildPersistentApp(appConfig, {
+      async getCve(id) { return cve(id, 9.8); },
+      async getPage(options = {}) {
+        if (options.startIndex === 0) return page(0, [cve(undefined, 9.8)], 2);
+        started.resolve(); return release.promise;
+      },
+    });
+    try {
+      await app.listen({ host: '127.0.0.1', port: 0 });
+      await started.promise;
+      assert.equal((await app.inject('/health/ready')).statusCode, 503);
+      assert.equal((await app.inject('/api/v1/vulnerabilities/summary')).statusCode, 503);
+      release.resolve(page(1, [cve('CVE-2024-1235')], 2));
+      await app.getDecorator<InitialSync>('initialSync').run();
+      assert.equal((await app.inject('/health/ready')).statusCode, 200);
+      const total = await app.inject('/api/v1/vulnerabilities/summary');
+      assert.equal(total.statusCode, 200);
+      assert.deepEqual(total.json(), {
+        total: 2, excludedRejected: 0,
+        bySeverity: { none: 0, low: 0, medium: 0, high: 0, critical: 1, unknown: 1 },
+        meta: { syncStatus: 'completed', lastPageTimestamp: UTC_DATE },
+      });
+      assert.equal((await app.inject({ method: 'PUT', url: '/api/v1/remediations/CVE-2024-1234' })).statusCode, 201);
+      const pending = await app.inject('/api/v1/vulnerabilities/pending/summary');
+      assert.equal(pending.statusCode, 200);
+      assert.equal(pending.json().total, 1);
+      assert.equal(pending.json().excludedRemediated, 1);
+      assert.equal(pending.json().bySeverity.critical, 0);
+    } finally {
+      release.resolve(page(1, [cve('CVE-2024-1235')], 2));
+      await app.close();
+    }
+    const reopened = await buildPersistentApp(appConfig, {
+      async getCve(): Promise<NvdCve | null> { assert.fail('No debe consultar NVD'); },
+      async getPage(): Promise<NvdPage> { assert.fail('No debe descargar un catálogo completed'); },
+    });
+    try {
+      await reopened.listen({ host: '127.0.0.1', port: 0 });
+      await reopened.getDecorator<InitialSync>('initialSync').run();
+      assert.equal((await reopened.inject('/health/ready')).statusCode, 200);
+      assert.equal((await reopened.inject('/api/v1/vulnerabilities/summary')).json().total, 2);
+      // El registro persistente de remediaciones corresponde al próximo incremento.
+      const pending = await reopened.inject('/api/v1/vulnerabilities/pending/summary');
+      assert.equal(pending.json().total, 2);
+      assert.equal(pending.json().excludedRemediated, 0);
+    } finally { await reopened.close(); }
+  });
+
+  await t.test('un fallo de almacenamiento devuelve 503 seguro, conserva live y se recupera al restaurar la tabla', async () => {
+    await catalog.savePage(page(0, [], 0));
+    const app = await buildPersistentApp({ ...loadConfig({ NODE_ENV: 'test' }), database }, {
+      async getCve(): Promise<NvdCve | null> { assert.fail('No debe consultar NVD'); },
+      async getPage(): Promise<NvdPage> { assert.fail('No debe consultar NVD'); },
+    });
+    try {
+      await app.getDecorator<InitialSync>('initialSync').run();
+      await fixture.query('ALTER TABLE app.sync_state RENAME TO sync_state_unavailable');
+      try {
+        assert.equal((await app.inject('/health/live')).statusCode, 200);
+        assert.deepEqual((await app.inject('/health/ready')).json(), { status: 'not_ready' });
+        assert.equal((await app.inject('/health/ready')).statusCode, 503);
+        for (const url of ['/api/v1/vulnerabilities/summary', '/api/v1/vulnerabilities/pending/summary']) {
+          const response = await app.inject(url);
+          assert.equal(response.statusCode, 503);
+          assert.deepEqual(response.json(), { error: 'storage_unavailable' });
+          assert.equal(response.headers['cache-control'], 'no-store');
+        }
+      } finally { await fixture.query('ALTER TABLE app.sync_state_unavailable RENAME TO sync_state'); }
+      const response = await app.inject('/api/v1/vulnerabilities/summary');
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().total, 0);
+      assert.equal(response.json().bySeverity.unknown, 0);
+      assert.equal((await app.inject('/health/ready')).statusCode, 200);
+    } finally { await app.close(); }
+  });
+
+  await t.test('cerrar el servidor espera el checkpoint paused antes de liberar el pool', async () => {
+    const started = Promise.withResolvers<void>();
+    const sessionsBefore = await fixture.query<{ count: string }>(`
+      SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND application_name = 'meli-cloudsec'
+    `, [name]);
+    const app = await buildPersistentApp({ ...loadConfig({ NODE_ENV: 'test' }), database }, {
+      async getCve(): Promise<NvdCve | null> { assert.fail('No debe consultar CVEs individuales'); },
+      async getPage(options = {}) {
+        if (options.startIndex === 0) return page(0, [cve()], 2);
+        return new Promise<NvdPage>((_resolve, reject) => {
+          options.signal!.addEventListener('abort', () => reject(new NvdError('CANCELLED')), { once: true });
+          started.resolve();
+        });
+      },
+    });
+    try {
+      await app.listen({ host: '127.0.0.1', port: 0 });
+      await started.promise;
+    } finally { await app.close(); }
+    const saved = await catalog.getProgress();
+    assert.equal(saved.status, 'paused');
+    assert.equal(saved.nextStartIndex, 1);
+    assert.equal(saved.storedRecords, 1);
+    const sessions = await fixture.query<{ count: string }>(`
+      SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND application_name = 'meli-cloudsec'
+    `, [name]);
+    assert.equal(sessions.rows[0]?.count, sessionsBefore.rows[0]?.count,
+      'El servidor liberó su pool; solo quedan las conexiones anteriores de la fixture');
   });
 });

@@ -1,7 +1,6 @@
 import type { FastifyInstance } from 'fastify';
-import type { RemediationStore } from '../remediations/store.js';
-import type { CveCatalog } from '../sync/catalog.js';
 import type { InitialSync } from '../sync/initial-sync.js';
+import type { ReadSummary } from './reader.js';
 
 const countSchema = { type: 'integer', minimum: 0 };
 const summarySchema = {
@@ -31,12 +30,19 @@ const summarySchema = {
       },
     },
     503: {
-      type: 'object', additionalProperties: false,
-      required: ['error', 'syncStatus'],
-      properties: {
-        error: { type: 'string', const: 'catalog_not_ready' },
-        syncStatus: { type: 'string', enum: ['idle', 'running', 'paused', 'failed'] },
-      },
+      oneOf: [
+        {
+          type: 'object', additionalProperties: false, required: ['error', 'syncStatus'],
+          properties: {
+            error: { type: 'string', const: 'catalog_not_ready' },
+            syncStatus: { type: 'string', enum: ['idle', 'running', 'paused', 'failed'] },
+          },
+        },
+        {
+          type: 'object', additionalProperties: false, required: ['error'],
+          properties: { error: { type: 'string', const: 'storage_unavailable' } },
+        },
+      ],
     },
   },
 };
@@ -54,27 +60,35 @@ const pendingSummarySchema = {
 
 export function registerVulnerabilityRoutes(
   app: FastifyInstance,
-  catalog: CveCatalog,
   sync: InitialSync,
-  remediations: Pick<RemediationStore, 'has'>,
+  readSummary: ReadSummary,
 ): void {
   for (const route of [
-    { path: '/api/v1/vulnerabilities/summary', schema: summarySchema, summarize: () => catalog.summary() },
+    { path: '/api/v1/vulnerabilities/summary', schema: summarySchema, pending: false },
     {
       path: '/api/v1/vulnerabilities/pending/summary', schema: pendingSummarySchema,
-      summarize: () => catalog.pendingSummary((id) => remediations.has(id)),
+      pending: true,
     },
   ]) {
-    app.get(route.path, { schema: route.schema }, async (_request, reply) => {
+    app.get(route.path, { schema: route.schema }, async (request, reply) => {
       reply.header('Cache-Control', 'no-store');
       const progress = sync.progress;
       if (progress.status !== 'completed') {
         return reply.code(503).send({ error: 'catalog_not_ready', syncStatus: progress.status });
       }
-      return {
-        ...route.summarize(),
-        meta: { syncStatus: progress.status, lastPageTimestamp: progress.lastPageTimestamp },
-      };
+      try {
+        const snapshot = await readSummary(route.pending);
+        if (snapshot.status !== 'completed') {
+          return reply.code(503).send({ error: 'catalog_not_ready', syncStatus: snapshot.status });
+        }
+        return {
+          ...snapshot.summary,
+          meta: { syncStatus: snapshot.status, lastPageTimestamp: snapshot.lastPageTimestamp },
+        };
+      } catch {
+        request.log.error({ event: 'vulnerability_summary_failed' }, 'No se pudo consultar el resumen');
+        return reply.code(503).send({ error: 'storage_unavailable' });
+      }
     });
   }
 }
