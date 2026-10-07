@@ -1,0 +1,80 @@
+x-db-client: &db-client
+  image: &postgres-image postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+  profiles: [tools]
+  # Los comandos npm reemplazan este usuario por el UID/GID del host.
+  user: "${DB_CLIENT_UID:-1000}:${DB_CLIENT_GID:-1000}"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp]
+  networks: [database]
+  depends_on:
+    db:
+      condition: service_healthy
+  entrypoint: [/bin/sh, /db/client.sh]
+
+services:
+  db:
+    image: *postgres-image
+    environment:
+      POSTGRES_DB: cves
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --data-checksums
+    ports: ["127.0.0.1:${DB_LOCAL_PORT:-5432}:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./db/bootstrap.sql:/docker-entrypoint-initdb.d/001_roles.sql:ro
+    secrets: [db_admin_password]
+    networks: [database]
+    healthcheck:
+      # El servidor temporal de initdb solo abre un socket Unix; esperar TCP.
+      test: [CMD-SHELL, "pg_isready --host 127.0.0.1 --username postgres --dbname cves"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    security_opt: [no-new-privileges:true]
+
+  migrate:
+    <<: *db-client
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: cves
+      PGUSER: cve_migrator
+      PGCONNECT_TIMEOUT: "5"
+      DB_PASSWORD_FILE: /run/secrets/db_migrator_password
+    secrets: [db_migrator_password]
+    volumes: ["./db:/db:ro"]
+    command: [/bin/sh, /db/migrate.sh]
+
+  db-check:
+    <<: *db-client
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: cves
+      PGUSER: cve_app
+      PGCONNECT_TIMEOUT: "5"
+      DB_PASSWORD_FILE: /run/secrets/db_app_password
+    secrets: [db_app_password]
+    volumes:
+      - ./db/client.sh:/db/client.sh:ro
+      - ./test/database-foundation.sql:/db/check.sql:ro
+    command: [psql, -X, --no-password, --set, ON_ERROR_STOP=1, --file, /db/check.sql]
+
+volumes:
+  postgres-data:
+
+networks:
+  # Bridge permite acceder desde Node en el host por el puerto loopback publicado.
+  database: {}
+
+secrets:
+  db_admin_password:
+    file: ./.secrets/db_admin_password
+  db_migrator_password:
+    file: ./.secrets/db_migrator_password
+  db_app_password:
+    file: ./.secrets/db_app_password

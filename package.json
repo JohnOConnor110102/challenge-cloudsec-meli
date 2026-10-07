@@ -11,13 +11,21 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file-if-exists=.env dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --test-isolation=none test/*.test.ts"
+    "test": "node --import tsx --test --test-isolation=none test/*.test.ts",
+    "db:up": "tsx src/db/local.ts up",
+    "db:migrate": "tsx src/db/local.ts migrate",
+    "db:test": "tsx src/db/local.ts test",
+    "db:test:node": "node --env-file-if-exists=.env --import tsx --test test/database.integration.ts test/catalog-persistence.integration.ts",
+    "db:check": "tsx --env-file-if-exists=.env src/db/check.ts",
+    "db:stop": "tsx src/db/local.ts stop"
   },
   "dependencies": {
-    "fastify": "5.12.5"
+    "fastify": "5.12.5",
+    "pg": "8.23.1"
   },
   "devDependencies": {
     "@types/node": "24.19.1",
+    "@types/pg": "8.23.1",
     "tsx": "4.23.15",
     "typescript": "7.0.2"
   }

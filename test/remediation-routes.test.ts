@@ -8,6 +8,7 @@ import type { NvdClient } from '../src/nvd/client.js';
 import type { NvdCve } from '../src/nvd/validation.js';
 import { RemediationStore } from '../src/remediations/store.js';
 import { CveCatalog } from '../src/sync/catalog.js';
+import { RemediationPersistenceError } from '../src/remediations/postgres-store.js';
 
 const ID = 'CVE-2024-1234';
 const URL = `/api/v1/remediations/${ID}`;
@@ -111,6 +112,7 @@ test('traduce los errores NVD e internos sin exponer detalles del proveedor en r
     [new NvdError('INVALID_RESPONSE'), 502, 'nvd_unavailable'],
     [new NvdError('TIMEOUT'), 504, 'nvd_timeout'],
     [new NvdError('CANCELLED'), 503, 'service_unavailable'],
+    [new RemediationPersistenceError(), 503, 'storage_unavailable'],
     [new Error('private-provider-detail private-nvd-key'), 500, 'internal_error'],
   ] as const) {
     const app = appFor(async () => { throw failure; });

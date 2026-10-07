@@ -1,9 +1,9 @@
-import { buildApp } from './app.js';
+import { buildPersistentApp } from './app.js';
 import { loadConfig } from './config.js';
 
 async function main() {
   const config = loadConfig();
-  const app = buildApp(config);
+  const app = await buildPersistentApp(config);
 
   let closing = false;
   async function shutdown(signal: string) {

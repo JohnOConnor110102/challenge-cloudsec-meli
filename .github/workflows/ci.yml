@@ -18,6 +18,10 @@ jobs:
     name: Calidad y dependencias
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      COMPOSE_PROJECT_NAME: meli-ci
+      DB_LOCAL_PORT: "55432"
+      DB_PORT: "55432"
     steps:
       - name: Obtener código
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,6 +48,24 @@ jobs:
 
       - name: Auditar dependencias de ejecución y desarrollo
         run: npm audit --audit-level=high
+
+      - name: Preparar PostgreSQL de pruebas
+        run: npm run db:up
+
+      - name: Aplicar migraciones y comprobar reejecución
+        run: |
+          npm run db:migrate
+          npm run db:migrate
+
+      - name: Verificar permisos y restricciones PostgreSQL
+        run: npm run db:test
+
+      - name: Verificar conexión Node a PostgreSQL
+        run: npm run db:test:node
+
+      - name: Eliminar la base temporal de CI
+        if: always()
+        run: docker compose down --volumes
 
   secrets:
     name: Secretos
