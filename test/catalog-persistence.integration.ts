@@ -8,6 +8,8 @@ import { openDatabase, readDatabasePassword } from '../src/db/pool.js';
 import { MAX_PAGE_SIZE } from '../src/nvd/validation.js';
 import type { NvdCve, NvdPage } from '../src/nvd/validation.js';
 import { CatalogCheckpointConflict, PostgresCatalog } from '../src/sync/postgres-catalog.js';
+import { InitialSync } from '../src/sync/initial-sync.js';
+import { NvdError } from '../src/nvd/client.js';
 
 const DATE = '2026-10-05T12:00:00.000';
 const UTC_DATE = `${DATE}Z`;
@@ -161,5 +163,115 @@ test('persistencia transaccional del catálogo con el usuario real de aplicació
     assert.equal(completed.nextStartIndex, MAX_PAGE_SIZE);
     assert.equal(completed.storedRecords, MAX_PAGE_SIZE);
     assert.deepEqual(await catalog.getProgress(), completed);
+  });
+
+  await t.test('InitialSync conserva un fallo NVD y otro pool reanuda; completed evita nuevas consultas', async () => {
+    const calls: number[] = [];
+    const sync = new InitialSync({
+      async getPage(options = {}) {
+        const start = options.startIndex ?? 0;
+        calls.push(start);
+        if (start === 1) throw new NvdError('HTTP', 503);
+        return page(0, [cve()], 2);
+      },
+    }, catalog);
+    await assert.rejects(sync.run(), { code: 'HTTP', status: 503 });
+    const failed = await catalog.getProgress();
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.nextStartIndex, 1);
+    assert.equal(failed.storedRecords, 1);
+    const reopened = await openDatabase(database, () => assert.fail('Conexión reabierta perdida'));
+    try {
+      const store = new PostgresCatalog(reopened);
+      const resumed = new InitialSync({ async getPage(options = {}) {
+        const start = options.startIndex ?? 0;
+        calls.push(start);
+        assert.equal(start, 1);
+        return page(start, [cve('CVE-2024-1235')], 2);
+      } }, store);
+      await resumed.run();
+      assert.deepEqual(calls, [0, 1, 1]);
+      assert.equal(resumed.progress.status, 'completed');
+      assert.equal(resumed.progress.storedRecords, 2);
+      const finished = new InitialSync({ async getPage(): Promise<NvdPage> {
+        assert.fail('Un catálogo completed no debe consultar NVD');
+      } }, store);
+      await finished.run();
+      assert.deepEqual(finished.progress, resumed.progress);
+      await assert.rejects(store.setStatus('failed', 2), CatalogCheckpointConflict);
+      assert.equal((await store.getProgress()).status, 'completed');
+    } finally { await reopened.end(); }
+  });
+
+  await t.test('pausar NVD guarda paused y otra instancia retoma el checkpoint confirmado', async () => {
+    const started = Promise.withResolvers<void>();
+    const sync = new InitialSync({ async getPage(options = {}) {
+      if (options.startIndex === 0) return page(0, [cve()], 2);
+      return new Promise<NvdPage>((_resolve, reject) => {
+        options.signal!.addEventListener('abort', () => reject(new NvdError('CANCELLED')), { once: true });
+        started.resolve();
+      });
+    } }, catalog);
+    const task = sync.run();
+    await started.promise;
+    sync.stop();
+    await task;
+    assert.equal((await catalog.getProgress()).status, 'paused');
+    assert.equal(sync.progress.nextStartIndex, 1);
+    const resumed = new InitialSync({ async getPage(options = {}) {
+      assert.equal(options.startIndex, 1);
+      return page(1, [cve('CVE-2024-1235')], 2);
+    } }, new PostgresCatalog(connection));
+    await resumed.run();
+    assert.equal(resumed.progress.status, 'completed');
+  });
+
+  await t.test('parar durante un guardado conserva la página confirmada y su checkpoint', async () => {
+    const committed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let calls = 0;
+    const sync = new InitialSync({ async getPage() { calls++; return page(0, [cve()], 2); } }, {
+      getProgress: () => catalog.getProgress(),
+      setStatus: (status, index) => catalog.setStatus(status, index),
+      async savePage(input) {
+        const saved = await catalog.savePage(input);
+        committed.resolve(); await release.promise;
+        return saved;
+      },
+    });
+    const task = sync.run();
+    await committed.promise;
+    sync.stop();
+    release.resolve();
+    await task;
+    assert.equal(calls, 1);
+    assert.equal((await catalog.getProgress()).status, 'paused');
+    assert.equal(sync.progress.nextStartIndex, 1);
+    assert.equal(sync.progress.storedRecords, 1);
+  });
+
+  await t.test('si se pierde la confirmación después de COMMIT, no pisa el checkpoint y al reintentar lo recupera', async () => {
+    let lost = false;
+    const calls: number[] = [];
+    const sync = new InitialSync({ async getPage(options = {}) {
+      const start = options.startIndex ?? 0;
+      calls.push(start);
+      return page(start, [cve(`CVE-2024-${1234 + start}`)], 2);
+    } }, {
+      getProgress: () => catalog.getProgress(),
+      setStatus: (status, index) => catalog.setStatus(status, index),
+      async savePage(input) {
+        const saved = await catalog.savePage(input);
+        if (!lost) { lost = true; throw new Error('Confirmación perdida'); }
+        return saved;
+      },
+    });
+    await assert.rejects(sync.run(), { message: 'Confirmación perdida' });
+    assert.equal(sync.progress.status, 'failed');
+    assert.equal((await catalog.getProgress()).nextStartIndex, 1);
+    await sync.run();
+    assert.deepEqual(calls, [0, 1]);
+    assert.equal(sync.progress.storedRecords, 2);
+    assert.equal(sync.progress.status, 'completed');
   });
 });

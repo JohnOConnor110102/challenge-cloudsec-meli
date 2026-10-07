@@ -159,7 +159,9 @@ Node usa [pg](https://node-postgres.com/apis/pool) sin ORM, como `cve_app`: pool
 
 Si ya creaste la red anterior, ejecutá `docker compose down` y luego `npm run db:up` para recrearla conservando el volumen.
 
-[PostgresCatalog](src/sync/postgres-catalog.ts) guarda cada página y su checkpoint en una transacción, con upsert por ID, fechas UTC y lock para rechazar escrituras con un checkpoint desactualizado. `getProgress()` recupera el estado tras reconectar; un total final inconsistente marca `failed` y reinicia el índice. Las pruebas crean y eliminan una base temporal propia, usando la credencial local de administración solo para prepararla. La conexión con `InitialSync` sigue pendiente.
+[PostgresCatalog](src/sync/postgres-catalog.ts) guarda cada página y su checkpoint en una transacción, con upsert por ID, fechas UTC y lock para rechazar escrituras con un checkpoint desactualizado. `getProgress()` recupera el estado tras reconectar; un total final inconsistente marca `failed` y reinicia el índice. Las pruebas crean y eliminan una base temporal propia, usando la credencial local de administración solo para prepararla.
+
+`InitialSync` acepta este repositorio mediante `SyncStore`: recupera el checkpoint al ejecutar, persiste `running`/`paused`/`failed` y evita recargar un catálogo `completed`. Confirma la página antes de avanzar; una parada durante el guardado conserva lo confirmado. Actualizar el estado exige el índice esperado y nunca rebaja `completed`. El adaptador `MemorySyncStore` conserva el funcionamiento actual de la API; conectar el servidor y sus resúmenes a PostgreSQL es el próximo incremento.
 
 ## Verificación
 
@@ -184,4 +186,4 @@ Los tres jobs se ejecutan en paralelo:
 
 ## Alcance pendiente
 
-El próximo incremento conecta `InitialSync` con el catálogo persistente. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.
+El próximo incremento conecta el servidor y sus resúmenes con PostgreSQL. Autenticación/autorización, contenedores de API/worker, despliegue e infraestructura cloud continúan pendientes.

@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import { classifyCve } from '../cvss/classification.js';
 import type { NvdPage } from '../nvd/validation.js';
 import { parseNvdPage } from '../nvd/validation.js';
-import type { SyncProgress } from './initial-sync.js';
+import type { SyncProgress, SyncStore } from './initial-sync.js';
 
 interface ProgressRow {
   status: SyncProgress['status'] | null;
@@ -30,7 +30,15 @@ export class CatalogCheckpointConflict extends Error {
   }
 }
 
-export class PostgresCatalog {
+function progress(row: ProgressRow): SyncProgress {
+  return {
+    status: row.status ?? 'idle', nextStartIndex: count(row.next_start_index ?? '0'),
+    totalResults: row.total_results === null ? null : count(row.total_results),
+    storedRecords: count(row.stored_records), lastPageTimestamp: row.last_page_timestamp?.toISOString() ?? null,
+  };
+}
+
+export class PostgresCatalog implements SyncStore {
   constructor(private readonly pool: Pool) {}
 
   async getProgress(): Promise<SyncProgress> {
@@ -42,14 +50,29 @@ export class PostgresCatalog {
         FROM (VALUES (1)) AS singleton(id)
         LEFT JOIN app.sync_state AS state USING (id)
       `);
-      const row = result.rows[0]!;
-      return {
-        status: row.status ?? 'idle', nextStartIndex: count(row.next_start_index ?? '0'),
-        totalResults: row.total_results === null ? null : count(row.total_results),
-        storedRecords: count(row.stored_records), lastPageTimestamp: row.last_page_timestamp?.toISOString() ?? null,
-      };
+      return progress(result.rows[0]!);
     } catch {
       throw new Error('No se pudo leer el progreso persistido');
+    }
+  }
+
+  async setStatus(status: 'running' | 'paused' | 'failed', expectedIndex: number): Promise<SyncProgress> {
+    try {
+      const result = await this.pool.query<ProgressRow>(`
+        WITH updated AS (
+          INSERT INTO app.sync_state (id, status, next_start_index) VALUES (1, $1, $2)
+          ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, updated_at = now()
+          WHERE app.sync_state.next_start_index = EXCLUDED.next_start_index
+            AND app.sync_state.status <> 'completed'
+          RETURNING status, next_start_index, total_results, last_page_timestamp
+        )
+        SELECT updated.*, (SELECT count(*) FROM app.cves) AS stored_records FROM updated
+      `, [status, expectedIndex]);
+      if (result.rows[0] === undefined) throw new CatalogCheckpointConflict();
+      return progress(result.rows[0]);
+    } catch (error) {
+      if (error instanceof CatalogCheckpointConflict) throw error;
+      throw new Error('No se pudo guardar el estado de sincronización');
     }
   }
 
